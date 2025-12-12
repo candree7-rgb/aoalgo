@@ -1,65 +1,63 @@
-import re, hashlib
-from typing import Optional, Dict, Any
+import re
+from typing import Optional, Dict, Any, List
 
 NUM = r"([0-9][0-9,]*\.?[0-9]*)"
 
-def _p(x: str) -> float:
-    return float(x.replace(",", ""))
+def _to_f(s: str) -> float:
+    return float(s.replace(",", ""))
 
 def parse_signal(text: str, quote: str = "USDT") -> Optional[Dict[str, Any]]:
-    # must contain SHORT/LONG signal
-    m0 = re.search(r"\b([A-Z0-9]+)\b\s+(LONG|SHORT)\s+Signal", text, re.I)
-    if not m0:
-        return None
+    t = text.replace("\r", "")
 
-    base = m0.group(1).upper()
-    side = "buy" if m0.group(2).upper() == "LONG" else "sell"   # Bybit: Buy/Sell
+    # Match: "**BARD** SHORT Signal" oder "**YALA** SHORT Signal"
+    m = re.search(r"\*\*([A-Z0-9]+)\*\*\s+(LONG|SHORT)\s+Signal", t, re.I)
+    if not m:
+        return None
+    base = m.group(1).upper()
+    side = "buy" if m.group(2).upper() == "LONG" else "sell"
 
     # Trigger/Entry
     trig = None
-    mtr = re.search(r"Enter\s+on\s+Trigger\s*:\s*`?\$?\s*" + NUM, text, re.I)
-    if mtr:
-        trig = _p(mtr.group(1))
+    m_tr = re.search(r"Enter\s+on\s+Trigger\s*:\s*`?\$?\s*" + NUM, t, re.I)
+    if m_tr:
+        trig = _to_f(m_tr.group(1))
     else:
-        me = re.search(r"\bEntry\b\s*:\s*`?\$?\s*" + NUM, text, re.I)
-        if me:
-            trig = _p(me.group(1))
+        m_en = re.search(r"\bEntry\s*:\s*`?\$?\s*" + NUM, t, re.I)
+        if m_en:
+            trig = _to_f(m_en.group(1))
     if trig is None:
         return None
 
-    # TPs (1..6)
-    tps = []
-    for i in range(1, 7):
-        mi = re.search(rf"\bTP{i}\b\s*:\s*`?\$?\s*{NUM}", text, re.I)
-        if mi:
-            tps.append(_p(mi.group(1)))
-    if not tps:
-        return None
+    # TPs (TP1..TP4)
+    tp_prices: List[float] = []
+    for i in range(1, 5):
+        m_tp = re.search(rf"\*\*TP{i}\:\*\*\s*`?\$?\s*{NUM}", t, re.I)
+        if m_tp:
+            tp_prices.append(_to_f(m_tp.group(1)))
+    if len(tp_prices) < 3:
+        return None  # wir brauchen mind. 3
 
-    # DCA (1..3) optional
-    dcas = []
+    # DCA #1..#3 (optional)
+    dca_prices: List[float] = []
     for i in range(1, 4):
-        mi = re.search(rf"\bDCA\s*#?{i}\b\s*:\s*`?\$?\s*{NUM}", text, re.I)
-        if mi:
-            dcas.append(_p(mi.group(1)))
+        m_d = re.search(rf"\*\*DCA\s*#?{i}\:\*\*\s*`?\$?\s*{NUM}", t, re.I)
+        if m_d:
+            dca_prices.append(_to_f(m_d.group(1)))
 
-    # SL optional (manchmal steht “Moved to Breakeven” statt Preis)
-    sl = None
-    msl = re.search(r"\bStop\s+Loss\b\s*:\s*`?\$?\s*" + NUM, text, re.I)
-    if msl:
-        sl = _p(msl.group(1))
+    # SL optional (manchmal steht er drin, manchmal später "moved to breakeven")
+    sl_price = None
+    m_sl = re.search(r"\*\*Stop\s+Loss\:\*\*\s*`?\$?\s*" + NUM, t, re.I)
+    if m_sl:
+        sl_price = _to_f(m_sl.group(1))
 
     symbol = f"{base}{quote}"
 
-    h = hashlib.md5(f"{symbol}|{side}|{trig}".encode()).hexdigest()
     return {
-        "symbol": symbol,
         "base": base,
-        "quote": quote,
-        "side": side,          # buy=LONG, sell=SHORT
+        "symbol": symbol,
+        "side": side,            # "buy" / "sell"
         "trigger": trig,
-        "tps": tps[:4],        # du nutzt eh TP1-TP4
-        "dcas": dcas[:3],
-        "stop_loss": sl,
-        "hash": h
+        "tp_prices": tp_prices,  # [tp1,tp2,tp3,(tp4?)]
+        "dca_prices": dca_prices,
+        "sl_price": sl_price,
     }
