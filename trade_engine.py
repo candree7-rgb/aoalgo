@@ -386,7 +386,8 @@ class TradeEngine:
                 tr["trailing_started"] = True
                 self.log.info(f"✅ TRAILING STARTED {tr['symbol']} after TP{tp_num}")
 
-    def _move_sl(self, symbol: str, sl_price: float) -> None:
+    def _move_sl(self, symbol: str, sl_price: float, max_retries: int = 3) -> bool:
+        """Move SL with retry logic for volatile markets."""
         rules = self._get_instrument_rules(symbol)
         sl_price = self._round_price(sl_price, rules["tick_size"])
         body = {
@@ -398,8 +399,21 @@ class TradeEngine:
         }
         if DRY_RUN:
             self.log.info(f"DRY_RUN move SL: {body}")
-            return
-        self.bybit.set_trading_stop(body)
+            return True
+
+        for attempt in range(max_retries):
+            try:
+                self.bybit.set_trading_stop(body)
+                return True
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.log.warning(f"SL move attempt {attempt+1} failed for {symbol}: {e} - retrying in 100ms...")
+                    time.sleep(0.1)  # 100ms wait
+                else:
+                    self.log.error(f"❌ SL move FAILED after {max_retries} attempts for {symbol}: {e}")
+                    self.log.error(f"   Trade continues with original SL!")
+                    return False
+        return False
 
     def _start_trailing(self, tr: Dict[str, Any], tp_num: int) -> None:
         # Bybit trailingStop expects absolute distance (price units), so we convert percent -> price distance
