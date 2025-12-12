@@ -1,76 +1,159 @@
 import time
 from typing import Dict, Any, List, Optional
+
 from config import (
-    CATEGORY, DEFAULT_LEVERAGE, ENTRY_EXPIRATION_MIN, ENTRY_TOO_FAR_PCT,
-    ENTRY_TRIGGER_BUFFER_PCT, ENTRY_LIMIT_PRICE_OFFSET_PCT,
-    TP_SPLITS, DCA_QTY_MULTS,
-    INITIAL_SL_PCT, MOVE_SL_TO_BE_ON_TP1, DRY_RUN
+    CATEGORY,
+    ENTRY_TOO_FAR_PCT,
+    ENTRY_TRIGGER_BUFFER_PCT,
+    ENTRY_LIMIT_PRICE_OFFSET_PCT,
+    INITIAL_SL_PCT,
+    MOVE_SL_TO_BE_ON_TP1,
+    DRY_RUN,
+    DCA_QTY_MULTS,
+    # Runner trailing
+    TRAIL_ENABLED,
+    TRAIL_AFTER_TP_INDEX,
+    TRAIL_DIST_PCT,
+    TRAIL_TRIGGER_BY,
 )
 
 def _side_to_pos_side(order_side: str) -> str:
     # order_side: Buy/Sell
     return "Long" if order_side == "Buy" else "Short"
 
+
 class TradeEngine:
     def __init__(self, bybit, state: dict):
         self.bybit = bybit
         self.state = state
 
-    # ---------- Helpers ----------
-    def _too_far(self, side: str, last: float, trigger: float) -> bool:
-        # User rule: wenn SHORT und Preis schon X% unter trigger -> skip
-        # SHORT => Sell
-        if side == "Sell":
-            return last <= trigger * (1 - ENTRY_TOO_FAR_PCT/100)
-        else:
-            return last >= trigger * (1 + ENTRY_TOO_FAR_PCT/100)
+    # ----------------- State helper -----------------
+    def _state_save(self):
+        # Wenn du state.py mit save() hast: nutzen. Sonst egal.
+        try:
+            fn = getattr(self.state, "save", None)
+            if callable(fn):
+                fn()
+        except:
+            pass
 
-    def _trigger_direction(self, side: str, last: float, trigger: float) -> int:
-        # Bybit triggerDirection: 1 = rises to trigger, 2 = falls to trigger (Bybit convention)
-        # We infer based on where last is vs trigger
+    # ----------------- Helpers -----------------
+    def _too_far(self, side: str, last: float, trigger: float) -> bool:
+        # SHORT (Sell): wenn Preis schon X% UNTER trigger ist -> skip
+        if side == "Sell":
+            return last <= trigger * (1 - ENTRY_TOO_FAR_PCT / 100)
+        # LONG (Buy): wenn Preis schon X% ÜBER trigger ist -> skip
+        return last >= trigger * (1 + ENTRY_TOO_FAR_PCT / 100)
+
+    def _trigger_direction(self, last: float, trigger: float) -> int:
+        # Bybit: 1 = rises to trigger, 2 = falls to trigger
         if last < trigger:
-            return 1  # needs rise
+            return 1
         if last > trigger:
-            return 2  # needs fall
+            return 2
         return 1
 
     def _qty_from_position(self, symbol: str) -> float:
         plist = self.bybit.positions(CATEGORY, symbol)
         for p in plist:
             if p.get("symbol") == symbol:
-                sz = float(p.get("size","0") or "0")
-                return sz
+                return float(p.get("size", "0") or "0")
         return 0.0
 
-    # ---------- Core ----------
-    def place_conditional_entry(self, sig: Dict[str,Any], client_trade_id: str) -> Optional[str]:
+    def _set_initial_sl(self, symbol: str, side: str, entry: float, sl_price_from_signal: Optional[float] = None):
+        if sl_price_from_signal is not None:
+            sl_price = float(sl_price_from_signal)
+        else:
+            if side == "Sell":
+                sl_price = entry * (1 + INITIAL_SL_PCT / 100)
+            else:
+                sl_price = entry * (1 - INITIAL_SL_PCT / 100)
+
+        body = {
+            "category": CATEGORY,
+            "symbol": symbol,
+            "positionIdx": 0,      # one-way
+            "stopLoss": f"{sl_price:.10f}",
+            "tpslMode": "Full",
+            "slTriggerBy": TRAIL_TRIGGER_BY if TRAIL_TRIGGER_BY else "LastPrice",
+        }
+
+        if DRY_RUN:
+            print("DRY_RUN set SL:", body)
+            return
+        self.bybit.set_trading_stop(body)
+
+    def _move_sl_to_price(self, symbol: str, sl_price: float):
+        body = {
+            "category": CATEGORY,
+            "symbol": symbol,
+            "positionIdx": 0,     # one-way
+            "stopLoss": f"{sl_price:.10f}",
+            "tpslMode": "Full",
+            "slTriggerBy": TRAIL_TRIGGER_BY if TRAIL_TRIGGER_BY else "LastPrice",
+        }
+        if DRY_RUN:
+            print("DRY_RUN move SL:", body)
+            return
+        self.bybit.set_trading_stop(body)
+
+    def _enable_trailing_for_runner(self, symbol: str):
+        # trailingStop = ABSOLUTER Abstand
+        last = self.bybit.last_price(CATEGORY, symbol)
+        trailing_dist = last * (TRAIL_DIST_PCT / 100.0)
+
+        body = {
+            "category": CATEGORY,
+            "symbol": symbol,
+            "positionIdx": 0,
+            "tpslMode": "Full",
+            "trailingStop": f"{trailing_dist:.10f}",
+            "tpTriggerBy": TRAIL_TRIGGER_BY if TRAIL_TRIGGER_BY else "LastPrice",
+            "slTriggerBy": TRAIL_TRIGGER_BY if TRAIL_TRIGGER_BY else "LastPrice",
+        }
+
+        if DRY_RUN:
+            print("DRY_RUN enable trailing:", body)
+            return
+
+        # Du hast in bybit_v5.py set_trailing_stop(body) als wrapper
+        self.bybit.set_trailing_stop(body)
+
+    # ----------------- Core: Conditional Entry -----------------
+    def place_conditional_entry(self, sig: Dict[str, Any], client_trade_id: str, qty: float) -> Optional[str]:
+        """
+        sig expected:
+          symbol, side ('buy'/'sell'), trigger (float)
+        qty: konkrete Ordermenge (du gibst die von deinem Risk-Modell rein)
+        """
         symbol = sig["symbol"]
-        side   = "Sell" if sig["side"] == "sell" else "Buy"
+        side = "Sell" if sig["side"] == "sell" else "Buy"
         trigger = float(sig["trigger"])
 
         last = self.bybit.last_price(CATEGORY, symbol)
         if self._too_far(side, last, trigger):
+            print(f"⛔ Skip {symbol}: price too far from trigger (last={last}, trigger={trigger})")
             return None
 
-        trigger_adj = trigger * (1 - ENTRY_TRIGGER_BUFFER_PCT/100) if side == "Buy" else trigger * (1 + ENTRY_TRIGGER_BUFFER_PCT/100)
+        # Optionaler Buffer auf Trigger (z.B. SHORT: +buffer, LONG: -buffer)
+        trigger_adj = trigger * (1 - ENTRY_TRIGGER_BUFFER_PCT / 100) if side == "Buy" else trigger * (1 + ENTRY_TRIGGER_BUFFER_PCT / 100)
 
-        # LIMIT price: optional aggressiver, um Fill zu sichern
+        # Entry-Limit-Preis (gegen Slippage / Fill-Qualität)
         limit_price = trigger
         if ENTRY_LIMIT_PRICE_OFFSET_PCT != 0:
             if side == "Sell":
-                # für SHORT willst du lieber etwas höher füllen (Sell Limit höher)
-                limit_price = trigger * (1 + abs(ENTRY_LIMIT_PRICE_OFFSET_PCT)/100)
+                limit_price = trigger * (1 + abs(ENTRY_LIMIT_PRICE_OFFSET_PCT) / 100)
             else:
-                limit_price = trigger * (1 - abs(ENTRY_LIMIT_PRICE_OFFSET_PCT)/100)
+                limit_price = trigger * (1 - abs(ENTRY_LIMIT_PRICE_OFFSET_PCT) / 100)
 
-        td = self._trigger_direction(side, last, trigger_adj)
+        td = self._trigger_direction(last, trigger_adj)
 
         body = {
             "category": CATEGORY,
             "symbol": symbol,
             "side": side,
             "orderType": "Limit",
-            "qty": "0.0",  # IMPORTANT: Set via risk model later (du kannst hier fixed qty rein tun)
+            "qty": f"{qty:.10f}",
             "price": f"{limit_price:.10f}",
             "timeInForce": "GTC",
             "triggerDirection": td,
@@ -78,12 +161,8 @@ class TradeEngine:
             "triggerBy": "LastPrice",
             "reduceOnly": False,
             "closeOnTrigger": False,
-            "orderLinkId": client_trade_id
+            "orderLinkId": client_trade_id,
         }
-
-        # NOTE: qty musst du setzen. Für jetzt: minimal safe, du kannst’s an Equity koppeln.
-        # Wenn du schon in Bybit “position size by margin” machst: dann musst du per API qty rechnen.
-        # Ich lasse es absichtlich NICHT “magisch” – sonst ballerst du dich weg.
 
         if DRY_RUN:
             print("DRY_RUN entry:", body)
@@ -91,125 +170,123 @@ class TradeEngine:
 
         resp = self.bybit.place_order(body)
         oid = ((resp.get("result") or {}).get("orderId")) or None
+        print(f"✅ Conditional entry placed: {symbol} {side} trigger={trigger_adj} limit={limit_price} oid={oid}")
         return oid
 
-    def on_execution(self, ev: Dict[str,Any]):
+    # ----------------- WS execution handler -----------------
+    def on_execution(self, ev: Dict[str, Any]):
         """
-        Called from WS: reacts instantly to fills.
+        Reacts instantly to fills.
+        Expects ev includes: symbol, orderId, orderLinkId, execType
         """
         symbol = ev.get("symbol")
-        if not symbol: return
+        if not symbol:
+            return
 
-        exec_type = ev.get("execType") or ev.get("type")  # WS payload differs slightly
-        if str(exec_type).lower() not in ("trade","execution","fill","taker","maker"):
-            # ignore non-fill events
-            pass
+        exec_type = str(ev.get("execType") or "").lower()
+        # Bybit sends different variants; we only act on trade-like execution
+        if exec_type and exec_type not in ("trade", "execution"):
+            return
 
-        # Identify which trade this execution belongs to via orderLinkId if available
-        link = ev.get("orderLinkId") or ev.get("orderLinkID") or ""
+        order_id = ev.get("orderId") or ""
+        link = ev.get("orderLinkId") or ""
         if not link:
             return
 
-        tr = self.state["open_trades"].get(link)
+        # Wir speichern TPs als {tradeId}:TP1 etc.
+        trade_id = link.split(":")[0]
+
+        tr = (self.state.get("open_trades") or {}).get(trade_id)
         if not tr:
             return
 
-        # If TP1 order filled -> move SL to BE
-        if MOVE_SL_TO_BE_ON_TP1 and tr.get("tp1_order_id") and ev.get("orderId") == tr.get("tp1_order_id"):
-            be = tr["entry_price"]
-            self._move_sl(symbol, tr["pos_side"], be)
-            tr["sl_moved_to_be"] = True
-            print(f"✅ SL -> BE @ {be} ({symbol})")
+        # ----- TP1 filled -> SL to BE -----
+        if MOVE_SL_TO_BE_ON_TP1 and tr.get("tp1_order_id") and order_id == tr["tp1_order_id"]:
+            if not tr.get("sl_moved_to_be"):
+                be = float(tr["entry_price"])
+                self._move_sl_to_price(tr["symbol"], be)
+                tr["sl_moved_to_be"] = True
+                print(f"✅ SL -> BE @ {be} ({tr['symbol']})")
+                self._state_save()
 
-    def _move_sl(self, symbol: str, pos_side: str, sl_price: float):
-        body = {
-            "category": CATEGORY,
-            "symbol": symbol,
-            "positionIdx": 0,  # one-way
-            "stopLoss": f"{sl_price:.10f}",
-            "tpslMode": "Full"
-        }
-        if DRY_RUN:
-            print("DRY_RUN move SL:", body)
-            return
-        self.bybit.set_trading_stop(body)
+        # ----- TP3 filled -> enable trailing for runner -----
+        if TRAIL_ENABLED and TRAIL_AFTER_TP_INDEX == 3 and tr.get("tp3_order_id") and order_id == tr["tp3_order_id"]:
+            if not tr.get("trailing_active"):
+                self._enable_trailing_for_runner(tr["symbol"])
+                tr["trailing_active"] = True
+                print(f"🔥 Trailing enabled ({TRAIL_DIST_PCT}%) for runner ({tr['symbol']})")
+                self._state_save()
 
-    def place_post_entry_orders(self, trade: Dict[str,Any]):
+    # ----------------- Post-entry orders (after entry fill) -----------------
+    def place_post_entry_orders(self, trade: Dict[str, Any]):
         """
-        Call this after detecting entry fill (either via WS order fill or via polling fallback).
+        Call after entry is filled.
         Places:
-        - SL (initial)
-        - TP ladder reduce-only
-        - DCA conditionals (add)
+          - initial SL on position
+          - TP1..TP3 reduce-only (90% total)
+          - DCA conditionals add orders
+        trade must include:
+          symbol, entry_price, order_side(Buy/Sell), tp_prices(list), tp_splits(list), dca_prices(list), id
+          optional sl_price (from signal)
         """
         symbol = trade["symbol"]
-        entry  = trade["entry_price"]
-        side   = trade["order_side"]     # Buy/Sell
-        pos_side = trade["pos_side"]
+        entry = float(trade["entry_price"])
+        side = trade["order_side"]  # Buy/Sell
 
-        # Initial SL: from signal if provided else INITIAL_SL_PCT
-        if trade.get("sl_price"):
-            sl_price = trade["sl_price"]
-        else:
-            if side == "Sell":
-                sl_price = entry * (1 + INITIAL_SL_PCT/100)
-            else:
-                sl_price = entry * (1 - INITIAL_SL_PCT/100)
+        # 1) Set initial SL (position-level)
+        self._set_initial_sl(symbol, side, entry, trade.get("sl_price"))
 
-        # Set SL at position-level (auto adjusts with size)
-        body = {
-            "category": CATEGORY,
-            "symbol": symbol,
-            "positionIdx": 0,
-            "stopLoss": f"{sl_price:.10f}",
-            "tpslMode": "Full"
-        }
-        if DRY_RUN:
-            print("DRY_RUN trading-stop:", body)
-        else:
-            self.bybit.set_trading_stop(body)
-
-        # TP ladder reduce-only LIMITs
-        # qty calc: percent of current position size
+        # 2) TP ladder: reduce-only LIMITs
         size = self._qty_from_position(symbol)
         if size <= 0:
             print("⚠️ No position size yet; retry later")
             return
 
-        tp_prices: List[float] = trade["tp_prices"]
-        splits = trade["tp_splits"]
+        tp_prices: List[float] = [float(x) for x in (trade.get("tp_prices") or [])]
+        splits: List[float] = [float(x) for x in (trade.get("tp_splits") or [])]
+
+        # Expect: splits = [30,30,30] (Runner = 10% stays open)
+        close_side = "Buy" if side == "Sell" else "Sell"
+
         for i, (tp, pct) in enumerate(zip(tp_prices, splits), start=1):
-            if pct <= 0: continue
-            qty = size * (pct/100)
+            if pct <= 0:
+                continue
+            qty = size * (pct / 100.0)
+
             o = {
                 "category": CATEGORY,
                 "symbol": symbol,
-                "side": "Buy" if side == "Sell" else "Sell",  # close direction
+                "side": close_side,
                 "orderType": "Limit",
                 "qty": f"{qty:.10f}",
                 "price": f"{tp:.10f}",
                 "timeInForce": "GTC",
                 "reduceOnly": True,
                 "closeOnTrigger": False,
-                "orderLinkId": f"{trade['id']}:TP{i}"
+                "orderLinkId": f"{trade['id']}:TP{i}",
             }
+
             if DRY_RUN:
                 print("DRY_RUN TP:", o)
                 oid = f"DRY_TP{i}"
             else:
                 resp = self.bybit.place_order(o)
                 oid = (resp.get("result") or {}).get("orderId")
+
             if i == 1:
                 trade["tp1_order_id"] = oid
+            if i == 3:
+                trade["tp3_order_id"] = oid
 
-        # DCA conditionals (add to position)
-        dca_prices = trade.get("dca_prices") or []
+        # 3) DCA conditionals (add to position)
+        dca_prices: List[float] = [float(x) for x in (trade.get("dca_prices") or [])]
         for j, p in enumerate(dca_prices, start=1):
-            # qty multiplier vs initial size chunk (simple)
-            # (du kannst später: base_qty * mult; und base_qty definierst du sauber)
-            qty = size * DCA_QTY_MULTS[min(j-1, len(DCA_QTY_MULTS)-1)]
+            mult = DCA_QTY_MULTS[min(j - 1, len(DCA_QTY_MULTS) - 1)]
+            qty = size * float(mult)
+
             last = self.bybit.last_price(CATEGORY, symbol)
-            td = self._trigger_direction(side, last, p)
+            td = self._trigger_direction(last, p)
+
             o = {
                 "category": CATEGORY,
                 "symbol": symbol,
@@ -223,9 +300,15 @@ class TradeEngine:
                 "triggerBy": "LastPrice",
                 "reduceOnly": False,
                 "closeOnTrigger": False,
-                "orderLinkId": f"{trade['id']}:DCA{j}"
+                "orderLinkId": f"{trade['id']}:DCA{j}",
             }
+
             if DRY_RUN:
                 print("DRY_RUN DCA:", o)
             else:
                 self.bybit.place_order(o)
+
+        # Persist in-memory trade state
+        trade.setdefault("sl_moved_to_be", False)
+        trade.setdefault("trailing_active", False)
+        self._state_save()
