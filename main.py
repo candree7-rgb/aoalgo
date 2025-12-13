@@ -46,8 +46,11 @@ def main():
     engine = TradeEngine(bybit, st, log)
 
     log.info("="*58)
-    log.info("Discord → Bybit Bot (One-way)" + (" | DRY_RUN" if DRY_RUN else "")) 
+    log.info("Discord → Bybit Bot (One-way)" + (" | DRY_RUN" if DRY_RUN else ""))
     log.info("="*58)
+
+    # Startup sync - check for orphaned positions
+    engine.startup_sync()
 
     # ----- WS thread -----
     ws_err = {"err": None}
@@ -92,6 +95,7 @@ def main():
             engine.cancel_expired_entries()
             engine.cleanup_closed_trades()
             engine.check_tp_fills_fallback()  # Catch TP1 fills if WS missed
+            engine.log_daily_stats()  # Log stats once per day
 
             # entry-fill fallback (polling) and post-orders placement
             for tid, tr in list(st.get("open_trades", {}).items()):

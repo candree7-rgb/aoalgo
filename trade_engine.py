@@ -27,6 +27,74 @@ class TradeEngine:
         self._instrument_cache: Dict[str, Dict[str, float]] = {}  # symbol -> rules
         self._cache_ttl = 300  # 5 min cache
         self._cache_times: Dict[str, float] = {}
+        self._last_stats_day: str = ""
+
+    # ---------- startup sync ----------
+    def startup_sync(self) -> None:
+        """Check for orphaned positions at startup and log warnings."""
+        if DRY_RUN:
+            self.log.info("DRY_RUN: Skipping startup sync")
+            return
+
+        try:
+            # Get all open positions
+            positions = self.bybit.positions(CATEGORY, "")  # Empty = all symbols
+            open_positions = [p for p in positions if float(p.get("size") or 0) > 0]
+
+            if not open_positions:
+                self.log.info("✅ Startup sync: No open positions found")
+                return
+
+            # Check which positions are tracked in state
+            tracked_symbols = set()
+            for tr in self.state.get("open_trades", {}).values():
+                if tr.get("status") in ("pending", "open"):
+                    tracked_symbols.add(tr.get("symbol"))
+
+            orphaned = []
+            for pos in open_positions:
+                symbol = pos.get("symbol")
+                size = float(pos.get("size") or 0)
+                side = pos.get("side")
+                entry = float(pos.get("avgPrice") or 0)
+                pnl = float(pos.get("unrealisedPnl") or 0)
+
+                if symbol not in tracked_symbols:
+                    orphaned.append(f"{symbol} ({side} {size} @ {entry}, PnL: {pnl:.2f})")
+
+            if orphaned:
+                self.log.warning(f"⚠️ Orphaned positions (not tracked by bot):")
+                for o in orphaned:
+                    self.log.warning(f"   → {o}")
+                self.log.warning("   These positions will NOT be managed automatically!")
+            else:
+                self.log.info(f"✅ Startup sync: {len(open_positions)} position(s), all tracked")
+
+        except Exception as e:
+            self.log.warning(f"Startup sync failed: {e}")
+
+    def log_daily_stats(self) -> None:
+        """Log daily trade statistics once per day."""
+        from state import utc_day_key
+        today = utc_day_key()
+
+        if self._last_stats_day == today:
+            return  # Already logged today
+
+        # Get yesterday's stats
+        yesterday_trades = 0
+        for tr in self.state.get("open_trades", {}).values():
+            placed_ts = tr.get("placed_ts") or 0
+            if placed_ts:
+                trade_day = utc_day_key(placed_ts)
+                if trade_day == self._last_stats_day:
+                    yesterday_trades += 1
+
+        if self._last_stats_day and yesterday_trades > 0:
+            daily_count = self.state.get("daily_counts", {}).get(self._last_stats_day, 0)
+            self.log.info(f"📊 Stats for {self._last_stats_day}: {daily_count} trades placed")
+
+        self._last_stats_day = today
 
     # ---------- precision helpers ----------
     @staticmethod
