@@ -134,8 +134,11 @@ class BybitV5:
         return ((data.get("result") or {}).get("list") or [])
 
     # ---------- Positions ----------
-    def positions(self, category: str, symbol: str) -> List[Dict[str, Any]]:
-        params = {"category": category, "symbol": symbol}
+    def positions(self, category: str, symbol: str = "") -> List[Dict[str, Any]]:
+        params = {"category": category}
+        if symbol:  # Only add symbol if specified
+            params["symbol"] = symbol
+        params["settleCoin"] = "USDT"  # Required for fetching all positions
         query_string = self._build_query_string(params)
         r = requests.get(
             f"{self.base}/v5/position/list",
