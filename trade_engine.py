@@ -70,6 +70,10 @@ class TradeEngine:
             else:
                 self.log.info(f"✅ Startup sync: {len(open_positions)} position(s), all tracked")
 
+            # Log performance report at startup
+            if self.state.get("trade_history"):
+                self.log_performance_report()
+
         except Exception as e:
             self.log.warning(f"Startup sync failed: {e}")
 
@@ -93,6 +97,9 @@ class TradeEngine:
         if self._last_stats_day and yesterday_trades > 0:
             daily_count = self.state.get("daily_counts", {}).get(self._last_stats_day, 0)
             self.log.info(f"📊 Stats for {self._last_stats_day}: {daily_count} trades placed")
+
+            # Log full performance report once per day
+            self.log_performance_report()
 
         self._last_stats_day = today
 
@@ -451,7 +458,31 @@ class TradeEngine:
                     pass
                 tr["status"] = "open"
                 tr["filled_ts"] = time.time()
+                # Initialize tracking fields
+                tr.setdefault("dca_fills", 0)
+                tr.setdefault("tp_fills", 0)
+                tr.setdefault("tp_fills_list", [])
                 self.log.info(f"✅ ENTRY FILLED {tr['symbol']} @ {tr.get('entry_price')}")
+            return
+
+        # DCA fills: orderLinkId pattern "<trade_id>:DCA1"
+        if ":DCA" in link:
+            trade_id, dca_tag = link.split(":", 1)
+            tr = self.state.get("open_trades", {}).get(trade_id)
+            if not tr:
+                return
+            import re as _re
+            m = _re.search(r"DCA(\d+)", dca_tag)
+            if m:
+                dca_num = int(m.group(1))
+                # Track DCA fill (avoid double counting)
+                filled_dcas = tr.get("dca_fills_list", [])
+                if dca_num not in filled_dcas:
+                    filled_dcas.append(dca_num)
+                    tr["dca_fills_list"] = filled_dcas
+                    tr["dca_fills"] = len(filled_dcas)
+                    dca_count = len(DCA_QTY_MULTS)
+                    self.log.info(f"📈 DCA{dca_num} FILLED {tr['symbol']} ({tr['dca_fills']}/{dca_count})")
             return
 
         # TP fills / other events: orderLinkId pattern "<trade_id>:TP1"
@@ -468,6 +499,15 @@ class TradeEngine:
                 tp_num = int(m.group(1))
             if not tp_num:
                 return
+
+            # Track TP fill (avoid double counting)
+            filled_tps = tr.get("tp_fills_list", [])
+            if tp_num not in filled_tps:
+                filled_tps.append(tp_num)
+                tr["tp_fills_list"] = filled_tps
+                tr["tp_fills"] = len(filled_tps)
+                tp_count = len(tr.get("tp_prices") or FALLBACK_TP_PCT)
+                self.log.info(f"🎯 TP{tp_num} HIT {tr['symbol']} ({tr['tp_fills']}/{tp_count})")
 
             # TP1 -> SL to BE
             if MOVE_SL_TO_BE_ON_TP1 and tp_num == 1 and not tr.get("sl_moved_to_be"):
@@ -609,6 +649,10 @@ class TradeEngine:
                     self._cancel_all_trade_orders(tr)
                     tr["status"] = "closed"
                     tr["closed_ts"] = time.time()
+
+                    # Fetch final PnL from Bybit
+                    self._fetch_and_store_trade_stats(tr)
+
                     self.log.info(f"✅ TRADE CLOSED {tr['symbol']} ({tid})")
             except Exception as e:
                 self.log.warning(f"Cleanup check failed for {tr['symbol']}: {e}")
@@ -619,6 +663,8 @@ class TradeEngine:
             if tr.get("status") in ("closed", "expired"):
                 closed_at = tr.get("closed_ts") or tr.get("placed_ts") or 0
                 if closed_at < cutoff:
+                    # Move to trade_history before deleting
+                    self._archive_trade(tr)
                     del self.state["open_trades"][tid]
 
     def _cancel_all_trade_orders(self, trade: Dict[str, Any]) -> None:
@@ -659,3 +705,201 @@ class TradeEngine:
 
         except Exception as e:
             self.log.warning(f"Failed to cleanup orders for {symbol}: {e}")
+
+    def _fetch_and_store_trade_stats(self, trade: Dict[str, Any]) -> None:
+        """Fetch final PnL from Bybit and determine exit reason."""
+        if DRY_RUN:
+            trade["realized_pnl"] = 0.0
+            trade["exit_reason"] = "dry_run"
+            return
+
+        symbol = trade["symbol"]
+        filled_ts = trade.get("filled_ts") or trade.get("placed_ts") or 0
+
+        try:
+            # Fetch closed PnL records around the time of this trade
+            start_time = int((filled_ts - 60) * 1000) if filled_ts else None
+            pnl_records = self.bybit.closed_pnl(CATEGORY, symbol, start_time=start_time, limit=20)
+
+            # Sum all PnL records for this symbol in the timeframe
+            total_pnl = 0.0
+            for rec in pnl_records:
+                rec_time = int(rec.get("createdTime") or 0)
+                if rec_time >= int(filled_ts * 1000):
+                    total_pnl += float(rec.get("closedPnl") or 0)
+
+            trade["realized_pnl"] = total_pnl
+            trade["is_win"] = total_pnl > 0
+
+            # Determine exit reason based on what happened
+            trade["exit_reason"] = self._determine_exit_reason(trade)
+
+            # Log trade summary
+            self._log_trade_summary(trade)
+
+        except Exception as e:
+            self.log.warning(f"Failed to fetch PnL for {symbol}: {e}")
+            trade["realized_pnl"] = None
+            trade["exit_reason"] = "unknown"
+
+    def _determine_exit_reason(self, trade: Dict[str, Any]) -> str:
+        """Determine how the trade was closed."""
+        tp_fills = trade.get("tp_fills", 0)
+        tp_count = len(trade.get("tp_prices") or FALLBACK_TP_PCT)
+        trailing_started = trade.get("trailing_started", False)
+        sl_moved_to_be = trade.get("sl_moved_to_be", False)
+        pnl = trade.get("realized_pnl", 0)
+
+        if trailing_started and pnl and pnl > 0:
+            return "trailing_stop"
+        elif tp_fills >= tp_count:
+            return "all_tps_hit"
+        elif tp_fills > 0 and sl_moved_to_be and pnl is not None and abs(pnl) < 1:
+            return "breakeven"
+        elif tp_fills > 0:
+            return f"tp{tp_fills}_then_sl"
+        elif pnl and pnl < 0:
+            return "stop_loss"
+        else:
+            return "unknown"
+
+    def _log_trade_summary(self, trade: Dict[str, Any]) -> None:
+        """Log a nice trade summary."""
+        symbol = trade["symbol"]
+        side = trade.get("pos_side", "")
+        entry = trade.get("entry_price", trade.get("trigger"))
+        pnl = trade.get("realized_pnl", 0) or 0
+        exit_reason = trade.get("exit_reason", "unknown")
+        tp_fills = trade.get("tp_fills", 0)
+        tp_count = len(trade.get("tp_prices") or FALLBACK_TP_PCT)
+        dca_fills = trade.get("dca_fills", 0)
+        dca_count = len(DCA_QTY_MULTS)
+        is_win = pnl > 0
+
+        emoji = "🟢" if is_win else "🔴"
+        result = "WIN" if is_win else "LOSS"
+
+        self.log.info(f"")
+        self.log.info(f"{'='*50}")
+        self.log.info(f"{emoji} TRADE {result}: {symbol} {side}")
+        self.log.info(f"{'='*50}")
+        self.log.info(f"   Entry: ${entry:.6f}")
+        self.log.info(f"   PnL: ${pnl:.2f} USDT")
+        self.log.info(f"   TPs Hit: {tp_fills}/{tp_count}")
+        self.log.info(f"   DCAs Filled: {dca_fills}/{dca_count}")
+        self.log.info(f"   Exit: {exit_reason}")
+        self.log.info(f"{'='*50}")
+        self.log.info(f"")
+
+    def _archive_trade(self, trade: Dict[str, Any]) -> None:
+        """Move closed trade to trade_history for long-term stats."""
+        history = self.state.setdefault("trade_history", [])
+
+        # Keep only essential fields for history
+        archived = {
+            "id": trade.get("id"),
+            "symbol": trade.get("symbol"),
+            "side": trade.get("pos_side"),
+            "entry_price": trade.get("entry_price"),
+            "trigger": trade.get("trigger"),
+            "placed_ts": trade.get("placed_ts"),
+            "filled_ts": trade.get("filled_ts"),
+            "closed_ts": trade.get("closed_ts"),
+            "realized_pnl": trade.get("realized_pnl"),
+            "is_win": trade.get("is_win"),
+            "exit_reason": trade.get("exit_reason"),
+            "tp_fills": trade.get("tp_fills", 0),
+            "tp_count": len(trade.get("tp_prices") or FALLBACK_TP_PCT),
+            "dca_fills": trade.get("dca_fills", 0),
+            "dca_count": len(DCA_QTY_MULTS),
+            "trailing_used": trade.get("trailing_started", False),
+        }
+        history.append(archived)
+
+        # Keep max 500 trades in history (oldest pruned)
+        if len(history) > 500:
+            self.state["trade_history"] = history[-500:]
+
+    def get_trade_stats(self, days: Optional[int] = None) -> Dict[str, Any]:
+        """Calculate trade statistics for the given period (None = all time)."""
+        history = self.state.get("trade_history", [])
+        now = time.time()
+
+        if days:
+            cutoff = now - (days * 86400)
+            trades = [t for t in history if (t.get("closed_ts") or 0) >= cutoff]
+        else:
+            trades = history
+
+        if not trades:
+            return {
+                "period_days": days or "all",
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "total_pnl": 0.0,
+                "avg_pnl": 0.0,
+                "best_trade": 0.0,
+                "worst_trade": 0.0,
+                "avg_tp_fills": 0.0,
+                "avg_dca_fills": 0.0,
+                "trailing_exits": 0,
+                "sl_exits": 0,
+                "be_exits": 0,
+            }
+
+        wins = [t for t in trades if t.get("is_win")]
+        losses = [t for t in trades if not t.get("is_win")]
+        pnls = [t.get("realized_pnl") or 0 for t in trades]
+        tp_fills = [t.get("tp_fills") or 0 for t in trades]
+        dca_fills = [t.get("dca_fills") or 0 for t in trades]
+
+        exit_reasons = [t.get("exit_reason") or "" for t in trades]
+        trailing_exits = sum(1 for r in exit_reasons if r == "trailing_stop")
+        sl_exits = sum(1 for r in exit_reasons if r == "stop_loss")
+        be_exits = sum(1 for r in exit_reasons if r == "breakeven")
+
+        return {
+            "period_days": days or "all",
+            "total_trades": len(trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0.0,
+            "total_pnl": round(sum(pnls), 2),
+            "avg_pnl": round(sum(pnls) / len(trades), 2) if trades else 0.0,
+            "best_trade": round(max(pnls), 2) if pnls else 0.0,
+            "worst_trade": round(min(pnls), 2) if pnls else 0.0,
+            "avg_tp_fills": round(sum(tp_fills) / len(trades), 1) if trades else 0.0,
+            "avg_dca_fills": round(sum(dca_fills) / len(trades), 1) if trades else 0.0,
+            "trailing_exits": trailing_exits,
+            "sl_exits": sl_exits,
+            "be_exits": be_exits,
+        }
+
+    def log_performance_report(self) -> None:
+        """Log a comprehensive performance report."""
+        stats_7d = self.get_trade_stats(7)
+        stats_30d = self.get_trade_stats(30)
+        stats_all = self.get_trade_stats()
+
+        self.log.info("")
+        self.log.info("=" * 60)
+        self.log.info("📊 PERFORMANCE REPORT")
+        self.log.info("=" * 60)
+
+        for label, stats in [("7 Days", stats_7d), ("30 Days", stats_30d), ("All Time", stats_all)]:
+            if stats["total_trades"] == 0:
+                self.log.info(f"\n{label}: No trades")
+                continue
+
+            self.log.info(f"\n📈 {label}:")
+            self.log.info(f"   Trades: {stats['total_trades']} | Wins: {stats['wins']} | Losses: {stats['losses']}")
+            self.log.info(f"   Win Rate: {stats['win_rate']}%")
+            self.log.info(f"   Total PnL: ${stats['total_pnl']:.2f} | Avg: ${stats['avg_pnl']:.2f}")
+            self.log.info(f"   Best: ${stats['best_trade']:.2f} | Worst: ${stats['worst_trade']:.2f}")
+            self.log.info(f"   Avg TPs Hit: {stats['avg_tp_fills']:.1f} | Avg DCAs: {stats['avg_dca_fills']:.1f}")
+            self.log.info(f"   Exits: {stats['trailing_exits']} trailing, {stats['sl_exits']} SL, {stats['be_exits']} BE")
+
+        self.log.info("")
+        self.log.info("=" * 60)

@@ -157,6 +157,21 @@ class BybitV5:
             return data
         return self._check(data)
 
+    def closed_pnl(self, category: str, symbol: str, start_time: Optional[int] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get closed PnL records for a symbol."""
+        params = {"category": category, "symbol": symbol, "limit": limit}
+        if start_time:
+            params["startTime"] = start_time
+        query_string = self._build_query_string(params)
+        r = requests.get(
+            f"{self.base}/v5/position/closed-pnl?{query_string}",
+            headers=self._headers(query_string),
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = self._check(r.json())
+        return ((data.get("result") or {}).get("list") or [])
+
     # ---------- WebSocket (private executions & orders) ----------
     def run_private_ws(self, on_execution, on_order=None, on_error=None):
         expires = int(time.time() * 1000) + 10_000
