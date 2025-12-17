@@ -721,20 +721,38 @@ class TradeEngine:
     def _export_trade_to_sheets(self, trade: Dict[str, Any]) -> None:
         """Export trade to Google Sheets immediately after close."""
         try:
+            # Calculate margin used for PnL % calculation
+            entry_price = trade.get("entry_price") or trade.get("trigger") or 0
+            base_qty = trade.get("base_qty") or 0
+            margin_used = (entry_price * base_qty) / LEVERAGE if entry_price and base_qty else 0
+
+            # Fetch current equity from Bybit for Equity PnL % calculation
+            equity_at_close = 0
+            try:
+                equity_at_close = self.bybit.wallet_equity(ACCOUNT_TYPE)
+            except Exception as e:
+                self.log.debug(f"Could not fetch equity: {e}")
+
+            # TP count = how many we actually placed (limited by TP_SPLITS), not signal's TP count
+            signal_tp_count = len(trade.get("tp_prices") or FALLBACK_TP_PCT)
+            actual_tp_count = min(signal_tp_count, len(TP_SPLITS))
+
             export_data = {
                 "id": trade.get("id"),
                 "symbol": trade.get("symbol"),
                 "side": trade.get("pos_side"),
-                "entry_price": trade.get("entry_price"),
+                "entry_price": entry_price,
                 "trigger": trade.get("trigger"),
                 "placed_ts": trade.get("placed_ts"),
                 "filled_ts": trade.get("filled_ts"),
                 "closed_ts": trade.get("closed_ts"),
                 "realized_pnl": trade.get("realized_pnl"),
+                "margin_used": margin_used,
+                "equity_at_close": equity_at_close,
                 "is_win": trade.get("is_win"),
                 "exit_reason": trade.get("exit_reason"),
                 "tp_fills": trade.get("tp_fills", 0),
-                "tp_count": len(trade.get("tp_prices") or FALLBACK_TP_PCT),
+                "tp_count": actual_tp_count,
                 "dca_fills": trade.get("dca_fills", 0),
                 "dca_count": len(DCA_QTY_MULTS),
                 "trailing_used": trade.get("trailing_started", False),
@@ -811,7 +829,9 @@ class TradeEngine:
         pnl = trade.get("realized_pnl", 0) or 0
         exit_reason = trade.get("exit_reason", "unknown")
         tp_fills = trade.get("tp_fills", 0)
-        tp_count = len(trade.get("tp_prices") or FALLBACK_TP_PCT)
+        # TP count = how many we actually placed (limited by TP_SPLITS)
+        signal_tp_count = len(trade.get("tp_prices") or FALLBACK_TP_PCT)
+        tp_count = min(signal_tp_count, len(TP_SPLITS))
         dca_fills = trade.get("dca_fills", 0)
         dca_count = len(DCA_QTY_MULTS)
         is_win = pnl > 0
@@ -835,6 +855,10 @@ class TradeEngine:
         """Move closed trade to trade_history for long-term stats."""
         history = self.state.setdefault("trade_history", [])
 
+        # TP count = how many we actually placed (limited by TP_SPLITS)
+        signal_tp_count = len(trade.get("tp_prices") or FALLBACK_TP_PCT)
+        actual_tp_count = min(signal_tp_count, len(TP_SPLITS))
+
         # Keep only essential fields for history
         archived = {
             "id": trade.get("id"),
@@ -849,7 +873,7 @@ class TradeEngine:
             "is_win": trade.get("is_win"),
             "exit_reason": trade.get("exit_reason"),
             "tp_fills": trade.get("tp_fills", 0),
-            "tp_count": len(trade.get("tp_prices") or FALLBACK_TP_PCT),
+            "tp_count": actual_tp_count,
             "dca_fills": trade.get("dca_fills", 0),
             "dca_count": len(DCA_QTY_MULTS),
             "trailing_used": trade.get("trailing_started", False),

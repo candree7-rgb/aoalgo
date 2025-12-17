@@ -35,6 +35,9 @@ TRADE_HEADERS = [
     "Closed Time",
     "Duration (min)",
     "Realized PnL",
+    "PnL % (Margin)",
+    "Equity at Close",
+    "PnL % (Equity)",
     "Win/Loss",
     "Exit Reason",
     "TPs Hit",
@@ -128,6 +131,17 @@ def _trade_to_row(trade: Dict[str, Any]) -> List[Any]:
     closed_ts = trade.get("closed_ts") or 0
     duration_min = round((closed_ts - filled_ts) / 60, 1) if filled_ts and closed_ts else 0
 
+    # Calculate PnL % relative to margin used
+    pnl = trade.get("realized_pnl", 0) or 0
+    margin_used = trade.get("margin_used", 0) or 0
+    pnl_margin_pct = round((pnl / margin_used) * 100, 2) if margin_used > 0 else 0
+
+    # Calculate PnL % relative to total equity BEFORE the trade
+    # equity_at_close already includes the PnL, so we subtract it to get equity before
+    equity_after = trade.get("equity_at_close", 0) or 0
+    equity_before = equity_after - pnl  # Equity before this trade's PnL
+    pnl_equity_pct = round((pnl / equity_before) * 100, 4) if equity_before > 0 else 0
+
     return [
         trade.get("id", ""),
         trade.get("symbol", ""),
@@ -138,7 +152,10 @@ def _trade_to_row(trade: Dict[str, Any]) -> List[Any]:
         _ts_to_datetime(filled_ts),
         _ts_to_datetime(closed_ts),
         duration_min,
-        trade.get("realized_pnl", 0) or 0,
+        pnl,
+        pnl_margin_pct,
+        equity_after,
+        pnl_equity_pct,
         "WIN" if trade.get("is_win") else "LOSS",
         trade.get("exit_reason", "unknown"),
         trade.get("tp_fills", 0),
