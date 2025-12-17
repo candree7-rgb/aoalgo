@@ -35,6 +35,7 @@ TRADE_HEADERS = [
     "Closed Time",
     "Duration (min)",
     "Realized PnL",
+    "PnL %",
     "Win/Loss",
     "Exit Reason",
     "TPs Hit",
@@ -128,6 +129,11 @@ def _trade_to_row(trade: Dict[str, Any]) -> List[Any]:
     closed_ts = trade.get("closed_ts") or 0
     duration_min = round((closed_ts - filled_ts) / 60, 1) if filled_ts and closed_ts else 0
 
+    # Calculate PnL % relative to margin used
+    pnl = trade.get("realized_pnl", 0) or 0
+    margin_used = trade.get("margin_used", 0) or 0
+    pnl_pct = round((pnl / margin_used) * 100, 2) if margin_used > 0 else 0
+
     return [
         trade.get("id", ""),
         trade.get("symbol", ""),
@@ -138,7 +144,8 @@ def _trade_to_row(trade: Dict[str, Any]) -> List[Any]:
         _ts_to_datetime(filled_ts),
         _ts_to_datetime(closed_ts),
         duration_min,
-        trade.get("realized_pnl", 0) or 0,
+        pnl,
+        pnl_pct,
         "WIN" if trade.get("is_win") else "LOSS",
         trade.get("exit_reason", "unknown"),
         trade.get("tp_fills", 0),
