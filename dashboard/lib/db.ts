@@ -123,12 +123,11 @@ export async function getStats(days?: number): Promise<Stats> {
       FROM trades
     `;
 
-    const params = [];
     if (days) {
       query += ` WHERE closed_at >= NOW() - INTERVAL '${days} days'`;
     }
 
-    const result = await client.query(query, params);
+    const result = await client.query(query);
     const row = result.rows[0];
 
     if (!row || row.total_trades === 0) {
