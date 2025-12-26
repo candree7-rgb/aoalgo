@@ -52,9 +52,6 @@ export default function StatsCards({ period }: StatsCardsProps) {
     );
   }
 
-  const avgWinPct = stats.wins > 0 ? (stats.total_pnl / stats.wins) : 0;
-  const avgLossPct = stats.losses > 0 ? (stats.total_pnl / stats.losses) : 0;
-
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
       {/* Total Trades */}
@@ -97,6 +94,30 @@ export default function StatsCards({ period }: StatsCardsProps) {
         label="Avg PnL"
         value={formatCurrency(stats.avg_pnl)}
         variant={stats.avg_pnl >= 0 ? 'success' : 'danger'}
+      />
+
+      {/* Avg Win */}
+      <StatCard
+        label="Avg Win"
+        value={formatCurrency(stats.avg_win)}
+        valueColor="text-success"
+        subValue={stats.wins > 0 ? `${stats.wins} trades` : undefined}
+      />
+
+      {/* Avg Loss */}
+      <StatCard
+        label="Avg Loss"
+        value={formatCurrency(stats.avg_loss)}
+        valueColor="text-danger"
+        subValue={stats.losses > 0 ? `${stats.losses} trades` : undefined}
+      />
+
+      {/* Win/Loss Ratio */}
+      <StatCard
+        label="Win/Loss Ratio"
+        value={`${stats.win_loss_ratio.toFixed(2)}:1`}
+        variant={stats.win_loss_ratio >= 1 ? 'success' : 'danger'}
+        subValue="R-multiple"
       />
 
       {/* Best Trade */}
