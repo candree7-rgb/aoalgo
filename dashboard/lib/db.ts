@@ -54,6 +54,9 @@ export interface Stats {
   win_rate: number;
   total_pnl: number;
   avg_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  win_loss_ratio: number;
   best_trade: number;
   worst_trade: number;
   avg_tp_fills: number;
@@ -113,6 +116,8 @@ export async function getStats(days?: number): Promise<Stats> {
         SUM(CASE WHEN NOT is_win THEN 1 ELSE 0 END) as losses,
         SUM(realized_pnl) as total_pnl,
         AVG(realized_pnl) as avg_pnl,
+        AVG(CASE WHEN is_win THEN realized_pnl END) as avg_win,
+        AVG(CASE WHEN NOT is_win THEN realized_pnl END) as avg_loss,
         MAX(realized_pnl) as best_trade,
         MIN(realized_pnl) as worst_trade,
         AVG(tp_fills) as avg_tp_fills,
@@ -138,6 +143,9 @@ export async function getStats(days?: number): Promise<Stats> {
         win_rate: 0,
         total_pnl: 0,
         avg_pnl: 0,
+        avg_win: 0,
+        avg_loss: 0,
+        win_loss_ratio: 0,
         best_trade: 0,
         worst_trade: 0,
         avg_tp_fills: 0,
@@ -148,6 +156,10 @@ export async function getStats(days?: number): Promise<Stats> {
       };
     }
 
+    const avg_win = parseFloat(row.avg_win || 0);
+    const avg_loss = parseFloat(row.avg_loss || 0);
+    const win_loss_ratio = avg_loss !== 0 ? Math.abs(avg_win / avg_loss) : 0;
+
     return {
       total_trades: parseInt(row.total_trades),
       wins: parseInt(row.wins),
@@ -155,6 +167,9 @@ export async function getStats(days?: number): Promise<Stats> {
       win_rate: parseFloat(((row.wins / row.total_trades) * 100).toFixed(1)),
       total_pnl: parseFloat(row.total_pnl || 0),
       avg_pnl: parseFloat(row.avg_pnl || 0),
+      avg_win,
+      avg_loss,
+      win_loss_ratio: parseFloat(win_loss_ratio.toFixed(2)),
       best_trade: parseFloat(row.best_trade || 0),
       worst_trade: parseFloat(row.worst_trade || 0),
       avg_tp_fills: parseFloat(row.avg_tp_fills || 0),
@@ -172,8 +187,6 @@ export async function getTPDistribution(): Promise<TPDistribution[]> {
   const client = await pool.connect();
   try {
     const result = await client.query(`
-      SELECT 0 as tp_level, COUNT(*) as count FROM trades WHERE tp_fills >= 0 AND closed_at IS NOT NULL
-      UNION ALL
       SELECT 1 as tp_level, COUNT(*) as count FROM trades WHERE tp_fills >= 1 AND closed_at IS NOT NULL
       UNION ALL
       SELECT 2 as tp_level, COUNT(*) as count FROM trades WHERE tp_fills >= 2 AND closed_at IS NOT NULL
