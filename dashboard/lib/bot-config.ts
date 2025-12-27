@@ -9,9 +9,9 @@ export interface BotConfig {
 }
 
 export const BOT_CONFIGS: Record<string, BotConfig> = {
-  main: {
-    id: 'main',
-    name: 'Main Bot',
+  ao: {
+    id: 'ao',
+    name: 'AO Bot',
     description: 'Original strategy with 3 TPs and 2 DCAs',
     tpCount: 3,
     dcaCount: 2,
@@ -30,7 +30,7 @@ export const BOT_CONFIGS: Record<string, BotConfig> = {
 };
 
 export function getBotConfig(botId: string): BotConfig {
-  return BOT_CONFIGS[botId] || BOT_CONFIGS.main;
+  return BOT_CONFIGS[botId] || BOT_CONFIGS.ao;
 }
 
 export function getAllBotIds(): string[] {

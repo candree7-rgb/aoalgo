@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS trades (
     trailing_used BOOLEAN DEFAULT FALSE,
 
     -- Multi-bot support
-    bot_id VARCHAR(50) DEFAULT 'main',
+    bot_id VARCHAR(50) DEFAULT 'ao',
 
     -- Metadata
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -83,7 +83,7 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_name = 'trades' AND column_name = 'bot_id') THEN
-        ALTER TABLE trades ADD COLUMN bot_id VARCHAR(50) DEFAULT 'main';
+        ALTER TABLE trades ADD COLUMN bot_id VARCHAR(50) DEFAULT 'ao';
         CREATE INDEX IF NOT EXISTS idx_trades_bot_id ON trades(bot_id);
     END IF;
 END $$;
