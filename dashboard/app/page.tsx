@@ -17,7 +17,7 @@ export default function Dashboard() {
     <main className="min-h-screen bg-background p-4 md:p-8">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-4xl font-bold mb-2">Systemic AO</h1>
+        <h1 className="text-4xl font-bold mb-2">Systemic*</h1>
         <p className="text-muted-foreground">Multi-bot trading dashboard</p>
       </div>
 
