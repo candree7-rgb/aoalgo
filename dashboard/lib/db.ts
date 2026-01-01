@@ -101,16 +101,76 @@ export async function getTrades(limit: number = 100, offset: number = 0, botId?:
   }
 }
 
-export async function getDailyEquity(days: number = 30): Promise<DailyEquity[]> {
+export async function getDailyEquity(days?: number): Promise<DailyEquity[]> {
   const client = await pool.connect();
   try {
-    const result = await client.query(
-      `SELECT * FROM daily_equity
-       ORDER BY date DESC
-       LIMIT $1`,
-      [days]
-    );
+    let query = `SELECT * FROM daily_equity ORDER BY date DESC`;
+    const params: any[] = [];
+
+    if (days) {
+      query += ` LIMIT $1`;
+      params.push(days);
+    }
+
+    const result = await client.query(query, params);
     return result.rows.reverse(); // Return chronological order for charts
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get cumulative PnL curve for a specific bot by summing up realized_pnl from trades
+ * This creates a pseudo-equity curve showing the bot's performance over time
+ */
+export async function getBotCumulativePnL(botId: string, days?: number): Promise<DailyEquity[]> {
+  const client = await pool.connect();
+  try {
+    let query = `
+      SELECT
+        DATE(closed_at) as date,
+        SUM(realized_pnl) OVER (ORDER BY DATE(closed_at)) as equity,
+        SUM(realized_pnl) as daily_pnl,
+        0 as daily_pnl_pct,
+        COUNT(*) as trades_count,
+        SUM(CASE WHEN is_win THEN 1 ELSE 0 END) as wins_count,
+        SUM(CASE WHEN NOT is_win THEN 1 ELSE 0 END) as losses_count,
+        MIN(closed_at) as created_at
+      FROM trades
+      WHERE bot_id = $1 AND closed_at IS NOT NULL
+    `;
+
+    const params: any[] = [botId];
+
+    if (days) {
+      query += ` AND closed_at >= NOW() - INTERVAL '${days} days'`;
+    }
+
+    query += `
+      GROUP BY DATE(closed_at)
+      ORDER BY date ASC
+    `;
+
+    const result = await client.query(query, params);
+
+    // Calculate daily_pnl_pct based on previous day's equity
+    const rows = result.rows.map((row, idx) => {
+      const prevEquity = idx > 0 ? parseFloat(result.rows[idx - 1].equity) : 0;
+      const dailyPnl = parseFloat(row.daily_pnl);
+      const dailyPnlPct = prevEquity > 0 ? (dailyPnl / prevEquity) * 100 : 0;
+
+      return {
+        ...row,
+        equity: parseFloat(row.equity),
+        daily_pnl: dailyPnl,
+        daily_pnl_pct: parseFloat(dailyPnlPct.toFixed(4)),
+        trades_count: parseInt(row.trades_count),
+        wins_count: parseInt(row.wins_count),
+        losses_count: parseInt(row.losses_count),
+      };
+    });
+
+    return rows;
   } finally {
     client.release();
   }

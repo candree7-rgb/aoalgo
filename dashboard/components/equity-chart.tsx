@@ -5,19 +5,28 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { DailyEquity } from '@/lib/db';
 import { formatCurrency } from '@/lib/utils';
 import { format } from 'date-fns';
+import TimeRangeSelector, { TimeRange, TIME_RANGES } from '@/components/time-range-selector';
 
 interface EquityChartProps {
-  days?: number;
+  botId?: string;
 }
 
-export default function EquityChart({ days = 30 }: EquityChartProps) {
+export default function EquityChart({ botId = 'all' }: EquityChartProps) {
   const [data, setData] = useState<DailyEquity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [timeRange, setTimeRange] = useState<TimeRange>('1M');
 
   useEffect(() => {
     async function fetchEquity() {
       try {
-        const res = await fetch(`/api/equity?days=${days}`);
+        const selectedRange = TIME_RANGES.find(r => r.value === timeRange);
+        const days = selectedRange?.days;
+
+        const params = new URLSearchParams();
+        if (days) params.append('days', days.toString());
+        if (botId && botId !== 'all') params.append('botId', botId);
+
+        const res = await fetch(`/api/equity?${params.toString()}`);
         const equity = await res.json();
         setData(equity);
       } catch (error) {
@@ -30,7 +39,7 @@ export default function EquityChart({ days = 30 }: EquityChartProps) {
     fetchEquity();
     const interval = setInterval(fetchEquity, 60000); // Refresh every 60s
     return () => clearInterval(interval);
-  }, [days]);
+  }, [timeRange, botId]);
 
   if (loading) {
     return (
@@ -66,7 +75,10 @@ export default function EquityChart({ days = 30 }: EquityChartProps) {
   return (
     <div className="bg-card border border-border rounded-lg p-6">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold">Equity Curve</h2>
+        <div className="flex items-center gap-4">
+          <h2 className="text-xl font-bold">Equity Curve</h2>
+          <TimeRangeSelector selected={timeRange} onSelect={setTimeRange} />
+        </div>
         <div className="text-right">
           <div className="text-2xl font-bold text-foreground">
             {formatCurrency(currentEquity)}

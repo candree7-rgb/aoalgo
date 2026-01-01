@@ -32,7 +32,7 @@ export default function Dashboard() {
 
       {/* Equity Chart */}
       <div className="mb-8">
-        <EquityChart days={30} />
+        <EquityChart botId={selectedBot} />
       </div>
 
       {/* TP & DCA Distribution */}
