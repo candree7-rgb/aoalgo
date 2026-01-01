@@ -36,6 +36,15 @@ export const BOT_CONFIGS: Record<string, BotConfig> = {
     hasTrailing: true,
     hasBreakeven: true,
   },
+  rya: {
+    id: 'rya',
+    name: 'RYA Bot',
+    description: '10% equity, 3-5 TPs, no DCA',
+    tpCount: 5,
+    dcaCount: 0,
+    hasTrailing: true,
+    hasBreakeven: true,
+  },
   fox: {
     id: 'fox',
     name: 'Fox Bot',
