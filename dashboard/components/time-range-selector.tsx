@@ -1,0 +1,38 @@
+'use client';
+
+export type TimeRange = '1W' | '1M' | '6M' | '1Y' | 'ALL';
+
+interface TimeRangeSelectorProps {
+  selected: TimeRange;
+  onSelect: (range: TimeRange) => void;
+}
+
+export const TIME_RANGES: { value: TimeRange; label: string; days: number | null }[] = [
+  { value: '1W', label: '1W', days: 7 },
+  { value: '1M', label: '1M', days: 30 },
+  { value: '6M', label: '6M', days: 180 },
+  { value: '1Y', label: '1Y', days: 365 },
+  { value: 'ALL', label: 'ALL', days: null },
+];
+
+export default function TimeRangeSelector({ selected, onSelect }: TimeRangeSelectorProps) {
+  return (
+    <div className="inline-flex rounded-lg border border-border bg-muted/50 p-1">
+      {TIME_RANGES.map(({ value, label }) => (
+        <button
+          key={value}
+          onClick={() => onSelect(value)}
+          className={`
+            px-3 py-1.5 text-sm font-medium rounded-md transition-all
+            ${selected === value
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'
+            }
+          `}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
