@@ -126,18 +126,18 @@ export async function getDailyEquity(days?: number): Promise<DailyEquity[]> {
 export async function getBotCumulativePnL(botId: string, days?: number): Promise<DailyEquity[]> {
   const client = await pool.connect();
   try {
+    // Use CTE to first aggregate by day, then apply window function for cumulative sum
     let query = `
-      SELECT
-        DATE(closed_at) as date,
-        SUM(realized_pnl) OVER (ORDER BY DATE(closed_at)) as equity,
-        SUM(realized_pnl) as daily_pnl,
-        0 as daily_pnl_pct,
-        COUNT(*) as trades_count,
-        SUM(CASE WHEN is_win THEN 1 ELSE 0 END) as wins_count,
-        SUM(CASE WHEN NOT is_win THEN 1 ELSE 0 END) as losses_count,
-        MIN(closed_at) as created_at
-      FROM trades
-      WHERE bot_id = $1 AND closed_at IS NOT NULL
+      WITH daily_aggregates AS (
+        SELECT
+          DATE(closed_at) as date,
+          SUM(realized_pnl) as daily_pnl,
+          COUNT(*) as trades_count,
+          SUM(CASE WHEN is_win THEN 1 ELSE 0 END) as wins_count,
+          SUM(CASE WHEN NOT is_win THEN 1 ELSE 0 END) as losses_count,
+          MIN(closed_at) as created_at
+        FROM trades
+        WHERE bot_id = $1 AND closed_at IS NOT NULL
     `;
 
     const params: any[] = [botId];
@@ -147,7 +147,18 @@ export async function getBotCumulativePnL(botId: string, days?: number): Promise
     }
 
     query += `
-      GROUP BY DATE(closed_at)
+        GROUP BY DATE(closed_at)
+      )
+      SELECT
+        date,
+        SUM(daily_pnl) OVER (ORDER BY date) as equity,
+        daily_pnl,
+        0 as daily_pnl_pct,
+        trades_count,
+        wins_count,
+        losses_count,
+        created_at
+      FROM daily_aggregates
       ORDER BY date ASC
     `;
 
