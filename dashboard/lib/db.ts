@@ -315,9 +315,10 @@ export async function getDCADistribution(dcaCount: number = 2, botId?: string): 
     const botFilter = botId ? `AND bot_id = '${botId}'` : '';
 
     // Build dynamic query based on dcaCount
+    // DCA0 = exactly 0 DCAs filled, DCA1 = exactly 1 DCA filled, etc.
     const queries: string[] = [];
     for (let i = 0; i <= dcaCount; i++) {
-      queries.push(`SELECT ${i} as dca_level, COUNT(*) as count FROM trades WHERE dca_fills >= ${i} AND closed_at IS NOT NULL ${botFilter}`);
+      queries.push(`SELECT ${i} as dca_level, COUNT(*) as count FROM trades WHERE dca_fills = ${i} AND closed_at IS NOT NULL ${botFilter}`);
     }
 
     const result = await client.query(`

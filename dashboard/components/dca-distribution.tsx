@@ -54,8 +54,8 @@ export default function DCADistributionChart({ botId }: DCADistributionChartProp
     );
   }
 
-  // Total trades = DCA0 count (all trades start with DCA0)
-  const totalTrades = data.length > 0 ? parseInt(data[0].count.toString()) : 1;
+  // Total trades = sum of all DCA levels (DCA0 + DCA1 + DCA2)
+  const totalTrades = data.reduce((sum, d) => sum + parseInt(d.count.toString()), 0);
 
   const chartData = data.map(d => {
     const count = parseInt(d.count.toString());
@@ -74,7 +74,7 @@ export default function DCADistributionChart({ botId }: DCADistributionChartProp
     <div className="bg-card border border-border rounded-lg p-6">
       <h2 className="text-xl font-bold mb-4">DCA Fill Distribution</h2>
       <p className="text-sm text-muted-foreground mb-4">
-        How often each DCA level was filled
+        DCA0 = No DCA filled • DCA1 = Exactly 1 DCA • DCA2 = Exactly 2 DCAs
       </p>
 
       <ResponsiveContainer width="100%" height={300}>
