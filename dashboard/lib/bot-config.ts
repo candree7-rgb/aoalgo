@@ -14,7 +14,7 @@ export const BOT_CONFIGS: Record<string, BotConfig> = {
     id: 'all',
     name: 'All Bots',
     description: 'Combined performance',
-    tpCount: 5,  // Max for display purposes
+    tpCount: 6,  // Max for display purposes (RVN has 6)
     dcaCount: 2, // Max for display purposes
     hasTrailing: true,
     hasBreakeven: true,
@@ -23,7 +23,7 @@ export const BOT_CONFIGS: Record<string, BotConfig> = {
   ao: {
     id: 'ao',
     name: 'AO',
-    description: '3 TPs, 2 DCAs',
+    description: '1.5% equity, 3 TPs +Trailing, 2 DCAs',
     tpCount: 3,
     dcaCount: 2,
     hasTrailing: true,
@@ -43,7 +43,7 @@ export const BOT_CONFIGS: Record<string, BotConfig> = {
   rya: {
     id: 'rya',
     name: 'RYA',
-    description: '10% equity, 3-5 TPs, Follow TP',
+    description: '5% equity, 3-5 TPs, Follow TP',
     tpCount: 5,
     dcaCount: 0,
     hasTrailing: true,
@@ -53,9 +53,9 @@ export const BOT_CONFIGS: Record<string, BotConfig> = {
   rvn: {
     id: 'rvn',
     name: 'RVN',
-    description: 'Low RR, 3 TPs, 2 DCAs',
-    tpCount: 3,
-    dcaCount: 2,
+    description: '5% equity, Low RR, Entry Zone, 6 TPs',
+    tpCount: 6,
+    dcaCount: 0,
     hasTrailing: true,
     hasBreakeven: true,
     isActive: true,
