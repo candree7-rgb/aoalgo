@@ -74,3 +74,37 @@ def parse_signal(text: str, quote: str = "USDT") -> Optional[Dict[str, Any]]:
 def signal_hash(sig: Dict[str, Any]) -> str:
     core = f"{sig.get('symbol')}|{sig.get('side')}|{sig.get('trigger')}|{sig.get('tp_prices')}|{sig.get('dca_prices')}"
     return hashlib.md5(core.encode("utf-8")).hexdigest()
+
+def parse_signal_update(text: str) -> Dict[str, Any]:
+    """
+    Parse SL/TP/DCA updates from a signal message.
+    Works on any message (not just NEW SIGNAL).
+    Returns dict with sl_price, tp_prices, dca_prices.
+    """
+    result = {
+        "sl_price": None,
+        "tp_prices": [],
+        "dca_prices": [],
+    }
+
+    # Extract SL
+    msl = RE_SL.search(text)
+    if msl:
+        result["sl_price"] = float(msl.group(1))
+
+    # Extract TPs (can be multiple)
+    tp_matches = list(RE_TP.finditer(text))
+    if tp_matches:
+        # Sort by TP number
+        tps = [(int(m.group(1)), float(m.group(2))) for m in tp_matches]
+        tps.sort(key=lambda x: x[0])
+        result["tp_prices"] = [tp[1] for tp in tps]
+
+    # Extract DCAs
+    dca_matches = list(RE_DCA.finditer(text))
+    if dca_matches:
+        dcas = [(int(m.group(1)), float(m.group(2))) for m in dca_matches]
+        dcas.sort(key=lambda x: x[0])
+        result["dca_prices"] = [dca[1] for dca in dcas]
+
+    return result

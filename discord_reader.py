@@ -52,6 +52,17 @@ class DiscordReader:
             params["after"] = str(max_id)
         return collected
 
+    def fetch_message(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single message by ID."""
+        url = f"https://discord.com/api/v10/channels/{self.channel_id}/messages/{message_id}"
+        try:
+            r = requests.get(url, headers=self.headers, timeout=10)
+            if r.status_code == 200:
+                return r.json()
+            return None
+        except Exception:
+            return None
+
     @staticmethod
     def message_timestamp_unix(msg: Dict[str, Any]) -> float:
         # Discord ISO timestamp: "2025-12-12T15:12:34.123456+00:00" or "...Z"

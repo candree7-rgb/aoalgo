@@ -1262,3 +1262,178 @@ class TradeEngine:
                 db_export.update_daily_equity(equity, today_trades, today_wins, today_losses)
             except Exception as e:
                 self.log.debug(f"Failed to update daily equity: {e}")
+
+    # ---------- signal update methods ----------
+    def _move_sl(self, symbol: str, new_sl: float) -> bool:
+        """Move stop loss to new price."""
+        if DRY_RUN:
+            self.log.info(f"DRY_RUN: Would move SL for {symbol} to {new_sl}")
+            return True
+
+        try:
+            rules = self._get_instrument_rules(symbol)
+            new_sl = self._round_price(new_sl, rules["tick_size"])
+
+            body = {
+                "category": CATEGORY,
+                "symbol": symbol,
+                "positionIdx": 0,
+                "stopLoss": f"{new_sl:.10f}",
+                "tpslMode": "Full",
+            }
+            self.bybit.set_trading_stop(body)
+            self.log.info(f"✅ SL moved to {new_sl} for {symbol}")
+            return True
+        except Exception as e:
+            self.log.warning(f"Failed to move SL for {symbol}: {e}")
+            return False
+
+    def update_tp_orders(self, trade: Dict[str, Any], new_tps: List[float]) -> bool:
+        """Cancel old TP orders and place new ones with updated prices."""
+        if DRY_RUN:
+            self.log.info(f"DRY_RUN: Would update TPs for {trade['symbol']} to {new_tps}")
+            return True
+
+        symbol = trade["symbol"]
+        side = trade["order_side"]
+        size, _ = self.position_size_avg(symbol)
+
+        if size <= 0:
+            self.log.warning(f"Cannot update TPs: no position for {symbol}")
+            return False
+
+        # Get instrument rules
+        rules = self._get_instrument_rules(symbol)
+        tick_size = rules["tick_size"]
+        qty_step = rules["qty_step"]
+        min_qty = rules["min_qty"]
+
+        # Cancel existing unfilled TP orders
+        tp_order_ids = trade.get("tp_order_ids", {})
+        filled_tps = trade.get("tp_fills_list", [])
+        splits = trade.get("tp_splits") or TP_SPLITS
+
+        for tp_num_str, order_id in list(tp_order_ids.items()):
+            tp_num = int(tp_num_str)
+            # Skip already filled TPs
+            if tp_num in filled_tps:
+                continue
+
+            try:
+                self.bybit.cancel_order({
+                    "category": CATEGORY,
+                    "symbol": symbol,
+                    "orderId": order_id
+                })
+                self.log.debug(f"Cancelled old TP{tp_num} order {order_id}")
+            except Exception as e:
+                self.log.debug(f"Failed to cancel TP{tp_num}: {e}")
+
+        # Place new TP orders
+        tp_version = trade.get("tp_version", 1) + 1
+        trade["tp_version"] = tp_version
+
+        for i, tp_price in enumerate(new_tps):
+            tp_num = i + 1
+
+            # Skip already filled TPs
+            if tp_num in filled_tps:
+                continue
+
+            # Skip if no split for this TP
+            if i >= len(splits) or splits[i] <= 0:
+                continue
+
+            tp = self._round_price(float(tp_price), tick_size)
+            qty = self._round_qty(size * (splits[i] / 100.0), qty_step, min_qty)
+
+            body = {
+                "category": CATEGORY,
+                "symbol": symbol,
+                "side": _opposite_side(side),
+                "orderType": "Limit",
+                "qty": f"{qty}",
+                "price": f"{tp:.10f}",
+                "timeInForce": "GTC",
+                "reduceOnly": True,
+                "closeOnTrigger": False,
+                "orderLinkId": f"{trade['id']}:TP{tp_num}v{tp_version}",
+            }
+
+            try:
+                resp = self.bybit.place_order(body)
+                new_oid = (resp.get("result") or {}).get("orderId")
+                if new_oid:
+                    tp_order_ids[str(tp_num)] = new_oid
+                    if tp_num == 1:
+                        trade["tp1_order_id"] = new_oid
+                    self.log.info(f"   Updated TP{tp_num}: {tp:.4f}")
+            except Exception as e:
+                self.log.warning(f"Failed to place updated TP{tp_num}: {e}")
+
+        # Update trade's TP prices
+        trade["tp_prices"] = new_tps
+        return True
+
+    def place_dca_orders(self, trade: Dict[str, Any]) -> bool:
+        """Place DCA orders for a trade that didn't have them initially."""
+        if DRY_RUN:
+            self.log.info(f"DRY_RUN: Would place DCAs for {trade['symbol']}")
+            return True
+
+        symbol = trade["symbol"]
+        side = trade["order_side"]
+        base_qty = float(trade.get("base_qty", 0))
+
+        if base_qty <= 0:
+            self.log.warning(f"Cannot place DCAs: no base qty for {symbol}")
+            return False
+
+        dca_prices = trade.get("dca_prices", [])
+        if not dca_prices:
+            self.log.debug(f"No DCA prices for {symbol}")
+            return False
+
+        # Get instrument rules
+        rules = self._get_instrument_rules(symbol)
+        tick_size = rules["tick_size"]
+        qty_step = rules["qty_step"]
+        min_qty = rules["min_qty"]
+
+        dca_to_place = min(len(dca_prices), len(DCA_QTY_MULTS))
+        last = self.bybit.last_price(CATEGORY, symbol)
+
+        self.log.info(f"📊 Placing {dca_to_place} DCAs for {symbol}")
+
+        for j in range(1, dca_to_place + 1):
+            price = self._round_price(float(dca_prices[j-1]), tick_size)
+            mult = DCA_QTY_MULTS[j-1]
+            qty = self._round_qty(base_qty * mult, qty_step, min_qty)
+            td = self._trigger_direction(last, price)
+
+            body = {
+                "category": CATEGORY,
+                "symbol": symbol,
+                "side": side,
+                "orderType": "Limit",
+                "qty": f"{qty}",
+                "price": f"{price:.10f}",
+                "timeInForce": "GTC",
+                "triggerDirection": td,
+                "triggerPrice": f"{price:.10f}",
+                "triggerBy": "LastPrice",
+                "reduceOnly": False,
+                "closeOnTrigger": False,
+                "orderLinkId": f"{trade['id']}:DCA{j}",
+            }
+
+            try:
+                resp = self.bybit.place_order(body)
+                oid = (resp.get("result") or {}).get("orderId")
+                if oid:
+                    self.log.info(f"   Placed DCA{j}: {price:.4f}")
+            except Exception as e:
+                self.log.warning(f"Failed to place DCA{j}: {e}")
+
+        trade["dca_orders_placed"] = True
+        return True
