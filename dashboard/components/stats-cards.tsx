@@ -38,9 +38,9 @@ export default function StatsCards({ period, botId }: StatsCardsProps) {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[...Array(8)].map((_, i) => (
-          <div key={i} className="bg-card border border-border rounded-lg p-6 animate-pulse">
+          <div key={i} className="bg-card border border-border rounded-lg p-4 md:p-6 animate-pulse">
             <div className="h-4 bg-muted rounded w-1/2 mb-2"></div>
             <div className="h-8 bg-muted rounded w-3/4"></div>
           </div>
@@ -58,7 +58,7 @@ export default function StatsCards({ period, botId }: StatsCardsProps) {
   }
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       {/* Total Trades */}
       <StatCard
         label="Total Trades"
@@ -204,7 +204,7 @@ function StatCard({ label, value, subValue, variant = 'default', valueColor }: S
   }
 
   return (
-    <div className={`${bgClass} border ${borderClass} rounded-lg p-6`}>
+    <div className={`${bgClass} border ${borderClass} rounded-lg p-4 md:p-6`}>
       <div className="text-sm text-muted-foreground mb-1">{label}</div>
       <div className={`text-2xl font-bold ${textClass}`}>{value}</div>
       {subValue && <div className="text-xs text-muted-foreground mt-1">{subValue}</div>}
