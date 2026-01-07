@@ -140,15 +140,16 @@ export async function getDailyEquity(days?: number, from?: string, to?: string):
       query += ` WHERE ${conditions.join(' AND ')}`;
     }
 
-    query += ` ORDER BY date ASC`;
-
     // Apply limit only if no custom date range and days is specified
     if (days && !from && !to) {
       const limitIndex = params.length + 1;
-      const result = await client.query(`${query} ORDER BY date DESC LIMIT $${limitIndex}`, [...params, days]);
+      query += ` ORDER BY date DESC LIMIT $${limitIndex}`;
+      params.push(days);
+      const result = await client.query(query, params);
       return result.rows.reverse();
     }
 
+    query += ` ORDER BY date ASC`;
     const result = await client.query(query, params);
     return result.rows;
   } finally {
