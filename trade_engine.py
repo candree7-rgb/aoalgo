@@ -321,10 +321,17 @@ class TradeEngine:
             return
 
         # ---- Calculate SL price ----
-        sl_pct = INITIAL_SL_PCT / 100.0
-        sl_price = entry * (1 + sl_pct) if side == "Sell" else entry * (1 - sl_pct)
-        sl_price = self._round_price(sl_price, tick_size)
-        self.log.info(f"📍 SL at {INITIAL_SL_PCT}% from entry: {sl_price}")
+        # Use SL from signal if available, otherwise fallback to INITIAL_SL_PCT
+        signal_sl = trade.get("sl_price")
+        if signal_sl and float(signal_sl) > 0:
+            sl_price = self._round_price(float(signal_sl), tick_size)
+            self.log.info(f"📍 SL from signal: {sl_price}")
+        else:
+            # Fallback: calculate SL from INITIAL_SL_PCT
+            sl_pct = INITIAL_SL_PCT / 100.0
+            sl_price = entry * (1 + sl_pct) if side == "Sell" else entry * (1 - sl_pct)
+            sl_price = self._round_price(sl_price, tick_size)
+            self.log.info(f"📍 SL fallback ({INITIAL_SL_PCT}% from entry): {sl_price}")
 
         tp_prices: List[float] = trade.get("tp_prices") or []
         splits: List[float] = trade.get("tp_splits") or TP_SPLITS
