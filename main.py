@@ -1,6 +1,6 @@
 import sys
 import time
-import random
+import datetime
 import threading
 import logging
 
@@ -9,125 +9,82 @@ from config import (
     BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_TESTNET, BYBIT_DEMO, RECV_WINDOW, ACCOUNT_TYPE,
     CATEGORY, QUOTE, LEVERAGE, RISK_PCT,
     MAX_CONCURRENT_TRADES, MAX_TRADES_PER_DAY, TC_MAX_LAG_SEC,
-    POLL_SECONDS, POLL_JITTER_MAX, SIGNAL_UPDATE_INTERVAL_SEC,
     STATE_FILE, DRY_RUN, LOG_LEVEL
 )
 from bybit_v5 import BybitV5
 from discord_reader import DiscordReader
-from signal_parser import parse_signal, signal_hash, parse_signal_update
+from signal_parser import parse_signal, signal_hash, is_signal_still_valid
 from state import load_state, save_state, utc_day_key
 from trade_engine import TradeEngine
 import db_export
 
+# ----- Hourly Polling Config -----
+SIGNAL_CHECK_DELAYS = [4, 8, 12, 16]  # Seconds after full hour to check for signals
+TRADE_MGMT_INTERVAL = 30              # Seconds between trade management checks
+
+
 def setup_logger() -> logging.Logger:
     log = logging.getLogger("bot")
     log.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-    h = logging.StreamHandler(sys.stdout)  # stdout so Railway shows INFO as normal (not red)
+    h = logging.StreamHandler(sys.stdout)
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
     h.setFormatter(fmt)
     log.handlers[:] = [h]
     return log
 
-def check_signal_updates(discord, engine, st, log):
-    """Re-read Discord messages for open/pending trades and apply SL/TP/DCA updates."""
 
-    # Find all active trades that have a discord_msg_id
-    active_trades = [
+def get_utc_now():
+    """Get current UTC time."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def seconds_until_next_hour():
+    """Calculate seconds until next full hour."""
+    now = get_utc_now()
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    return (next_hour - now).total_seconds()
+
+
+def check_signal_status(discord, engine, st, log):
+    """Check if any pending trades have been cancelled by the signal source."""
+    pending_trades = [
         tr for tr in st.get("open_trades", {}).values()
-        if tr.get("status") in ("pending", "open") and tr.get("discord_msg_id")
+        if tr.get("status") == "pending" and tr.get("discord_msg_id")
     ]
 
-    if not active_trades:
-        return
-
-    log.info(f"🔍 Checking {len(active_trades)} trade(s) for signal updates...")
-
-    for tr in active_trades:
+    for tr in pending_trades:
         try:
             msg_id = tr.get("discord_msg_id")
             if not msg_id:
                 continue
 
-            # Fetch the current Discord message
             msg = discord.fetch_message(str(msg_id))
             if not msg:
-                log.warning(f"   {tr.get('symbol')}: Could not fetch msg {msg_id}")
                 continue
 
-            # Extract text from the message
             txt = discord.extract_text(msg)
             if not txt:
                 continue
 
-            # Check for TRADE CANCELLED
-            if "TRADE CANCELLED" in txt.upper() or "CLOSED WITHOUT ENTRY" in txt.upper():
-                log.warning(f"❌ Signal CANCELLED for {tr['symbol']} - cancelling all orders")
-                # Cancel Entry Order if pending
-                if tr.get("status") == "pending":
-                    entry_oid = tr.get("entry_order_id")
-                    if entry_oid:
-                        engine.cancel_entry(tr["symbol"], entry_oid)
-                # Cancel all TP/DCA Orders if open
-                if tr.get("status") == "open":
-                    engine._cancel_all_trade_orders(tr)
+            # Check if signal is still valid (ACTIVE status)
+            if not is_signal_still_valid(txt):
+                log.warning(f"❌ Signal no longer ACTIVE for {tr['symbol']} - cancelling entry")
+                entry_oid = tr.get("entry_order_id")
+                if entry_oid:
+                    engine.cancel_entry(tr["symbol"], entry_oid)
                 tr["status"] = "cancelled"
                 tr["exit_reason"] = "signal_cancelled"
-                continue
-
-            # Parse SL/TP/DCA from the text
-            sig = parse_signal_update(txt)
-
-            new_sl = sig.get("sl_price")
-            new_tps = sig.get("tp_prices") or []
-            new_dcas = sig.get("dca_prices") or []
-
-            old_sl = tr.get("sl_price")
-            old_tps = tr.get("tp_prices") or []
-            old_dcas = tr.get("dca_prices") or []
-
-            is_open = tr.get("status") == "open"
-
-            # SL Update Check
-            if new_sl and new_sl != old_sl and not tr.get("sl_moved_to_be"):
-                log.info(f"🔄 Signal SL updated for {tr['symbol']}: {old_sl} → {new_sl}")
-                tr["sl_price"] = new_sl
-                if is_open:
-                    engine._move_sl(tr["symbol"], new_sl)
-
-            # TP Update Check
-            tps_changed = False
-            if new_tps and len(new_tps) > 0:
-                if len(new_tps) != len(old_tps):
-                    tps_changed = True
-                elif any(abs(float(new_tps[i]) - float(old_tps[i])) > 0.0000001
-                         for i in range(len(new_tps))):
-                    tps_changed = True
-
-            if tps_changed:
-                log.info(f"🔄 Signal TPs changed for {tr['symbol']}: {old_tps} → {new_tps}")
-                if is_open and tr.get("post_orders_placed"):
-                    engine.update_tp_orders(tr, new_tps)
-                else:
-                    tr["tp_prices"] = new_tps
-
-            # DCA Update Check (only if previously empty)
-            if new_dcas and not old_dcas:
-                log.info(f"🔄 Signal DCA added for {tr['symbol']}: {new_dcas}")
-                tr["dca_prices"] = new_dcas
-                if is_open and not tr.get("dca_orders_placed"):
-                    engine.place_dca_orders(tr)
+                save_state(STATE_FILE, st)
 
         except Exception as e:
-            log.debug(f"Signal update check failed for {tr.get('symbol')}: {e}")
+            log.debug(f"Signal status check failed for {tr.get('symbol')}: {e}")
 
-    # Save state
-    save_state(STATE_FILE, st)
 
 def main():
     log = setup_logger()
 
-    # basic env checks
-    missing = [k for k,v in {
+    # Basic env checks
+    missing = [k for k, v in {
         "DISCORD_TOKEN": DISCORD_TOKEN,
         "CHANNEL_ID": CHANNEL_ID,
         "BYBIT_API_KEY": BYBIT_API_KEY,
@@ -142,15 +99,16 @@ def main():
     discord = DiscordReader(DISCORD_TOKEN, CHANNEL_ID)
     engine = TradeEngine(bybit, st, log)
 
-    log.info("="*58)
+    log.info("=" * 58)
     mode_str = " | DRY_RUN" if DRY_RUN else ""
     mode_str += " | DEMO" if BYBIT_DEMO else ""
     mode_str += " | TESTNET" if BYBIT_TESTNET else ""
-    log.info("Discord → Bybit Bot (One-way)" + mode_str)
-    log.info("="*58)
+    log.info("AO Algo → Bybit Bot (Hourly Signals)" + mode_str)
+    log.info("=" * 58)
     log.info(f"Config: CATEGORY={CATEGORY}, QUOTE={QUOTE}, LEVERAGE={LEVERAGE}x")
     log.info(f"Config: RISK_PCT={RISK_PCT}%, MAX_CONCURRENT={MAX_CONCURRENT_TRADES}, MAX_DAILY={MAX_TRADES_PER_DAY}")
-    log.info(f"Config: POLL_SECONDS={POLL_SECONDS}, TC_MAX_LAG_SEC={TC_MAX_LAG_SEC}")
+    log.info(f"Config: Signal checks at XX:00:{SIGNAL_CHECK_DELAYS}")
+    log.info(f"Config: Trade management every {TRADE_MGMT_INTERVAL}s")
     log.info(f"Config: DRY_RUN={DRY_RUN}, LOG_LEVEL={LOG_LEVEL}")
 
     # Initialize database if enabled
@@ -168,8 +126,12 @@ def main():
     last_heartbeat = time.time()
     HEARTBEAT_INTERVAL = 300  # Log heartbeat every 5 minutes
 
-    # Signal update tracking
-    last_signal_update_check = time.time() - (SIGNAL_UPDATE_INTERVAL_SEC - 5)  # First check after 5 seconds
+    # Trade management tracking
+    last_trade_mgmt = time.time()
+
+    # Signal check tracking (for hourly polling)
+    signal_checks_done = set()  # Track which delays we've checked this hour
+    last_check_hour = -1        # Track which hour we last checked
 
     # ----- WS thread -----
     ws_err = {"err": None}
@@ -181,12 +143,11 @@ def main():
             log.warning(f"WS execution handler error: {e}")
 
     def on_order(ev):
-        # optional: could track cancellations etc
         return
 
     def on_ws_error(err):
         ws_err["err"] = err
-        log.debug(f"WS reconnecting: {err}")  # Normal, reduced to DEBUG
+        log.debug(f"WS reconnecting: {err}")
 
     def ws_loop():
         while True:
@@ -207,148 +168,185 @@ def main():
         k = utc_day_key()
         st.setdefault("daily_counts", {})[k] = int(st.get("daily_counts", {}).get(k, 0)) + 1
 
+    def can_take_new_trade() -> bool:
+        active = [tr for tr in st.get("open_trades", {}).values() if tr.get("status") in ("pending", "open")]
+        if len(active) >= MAX_CONCURRENT_TRADES:
+            return False
+        if trades_today() >= MAX_TRADES_PER_DAY:
+            return False
+        return True
+
+    def check_for_new_signals():
+        """Fetch and process new signals from Discord."""
+        if not can_take_new_trade():
+            return
+
+        after = st.get("last_discord_id")
+        log.debug(f"Polling Discord (after={after})...")
+
+        try:
+            msgs = discord.fetch_after(after, limit=50)
+        except Exception as e:
+            log.warning(f"Discord fetch failed: {e}")
+            return
+
+        log.debug(f"Fetched {len(msgs)} message(s) from Discord")
+        msgs_sorted = sorted(msgs, key=lambda m: int(m.get("id", "0")))
+        max_seen = int(after or 0)
+        found_signal = False
+
+        for m in msgs_sorted:
+            mid = int(m.get("id", "0"))
+            max_seen = max(max_seen, mid)
+
+            # Ignore very old messages
+            ts = discord.message_timestamp_unix(m)
+            age = time.time() - ts if ts else 0
+            if ts and age > TC_MAX_LAG_SEC:
+                log.debug(f"Skipping old message (age={age:.0f}s > {TC_MAX_LAG_SEC}s)")
+                continue
+
+            txt = discord.extract_text(m)
+            if not txt:
+                continue
+
+            log.debug(f"Message {mid}: {txt[:200]}...")
+
+            sig = parse_signal(txt, quote=QUOTE)
+            if not sig:
+                if "SIGNAL" in txt.upper() and "LONG" in txt.upper() or "SHORT" in txt.upper():
+                    log.warning(f"⚠️ Possible signal NOT parsed: {txt[:300]}...")
+                continue
+
+            log.info(f"📨 Signal parsed: {sig['symbol']} {sig['side'].upper()} @ {sig['trigger']}")
+            found_signal = True
+
+            sh = signal_hash(sig)
+            seen = set(st.get("seen_signal_hashes", []))
+            if sh in seen:
+                log.debug(f"Signal {sig['symbol']} already seen, skipping")
+                continue
+
+            # Mark seen early
+            seen.add(sh)
+            st["seen_signal_hashes"] = list(seen)[-500:]
+
+            trade_id = f"{sig['symbol']}|{sig['side']}|{int(time.time())}"
+            log.info(f"🔄 Placing entry order for {sig['symbol']}...")
+            oid = engine.place_conditional_entry(sig, trade_id)
+            if not oid:
+                log.warning(f"❌ Entry order failed for {sig['symbol']}")
+                continue
+
+            # Get current equity for risk tracking
+            try:
+                equity_now = bybit.wallet_equity(ACCOUNT_TYPE)
+            except Exception:
+                equity_now = 0
+
+            # Store trade
+            st.setdefault("open_trades", {})[trade_id] = {
+                "id": trade_id,
+                "symbol": sig["symbol"],
+                "order_side": "Sell" if sig["side"] == "sell" else "Buy",
+                "pos_side": "Short" if sig["side"] == "sell" else "Long",
+                "trigger": float(sig["trigger"]),
+                "tp_prices": sig.get("tp_prices") or [],
+                "tp_splits": None,
+                "dca_prices": [],  # No DCA for AO Algo
+                "sl_price": sig.get("sl_price"),
+                "entry_order_id": oid,
+                "status": "pending",
+                "placed_ts": time.time(),
+                "base_qty": engine.calc_base_qty(sig["symbol"], float(sig["trigger"])),
+                "raw": sig.get("raw", ""),
+                "discord_msg_id": mid,
+                "risk_pct": RISK_PCT,
+                "risk_amount": round(equity_now * RISK_PCT / 100, 2) if equity_now > 0 else None,
+                "equity_at_entry": round(equity_now, 2) if equity_now > 0 else None,
+                "leverage": LEVERAGE,
+            }
+            inc_trades_today()
+            log.info(f"🟡 ENTRY PLACED {sig['symbol']} {sig['side'].upper()} trigger={sig['trigger']} (id={trade_id})")
+
+            # Stop if we hit limits mid-batch
+            if not can_take_new_trade():
+                break
+
+        st["last_discord_id"] = str(max_seen) if max_seen else after
+        save_state(STATE_FILE, st)
+        return found_signal
+
     # ----- main loop -----
+    log.info("🚀 Bot started. Waiting for signals at full hours...")
+
     while True:
         try:
+            now = get_utc_now()
+            current_hour = now.hour
+            current_second = now.second
+
+            # Reset signal checks at new hour
+            if current_hour != last_check_hour:
+                signal_checks_done = set()
+                last_check_hour = current_hour
+                if now.minute == 0 and current_second < 2:
+                    log.info(f"⏰ New hour: {now.strftime('%H:%M')} UTC - preparing signal checks")
+
             # Heartbeat log every 5 minutes
             if time.time() - last_heartbeat > HEARTBEAT_INTERVAL:
-                active = [tr for tr in st.get("open_trades", {}).values() if tr.get("status") in ("pending","open")]
-                log.info(f"💓 Heartbeat: {len(active)} active trade(s), {trades_today()} today")
+                active = [tr for tr in st.get("open_trades", {}).values() if tr.get("status") in ("pending", "open")]
+                next_check = seconds_until_next_hour()
+                log.info(f"💓 Heartbeat: {len(active)} active trade(s), {trades_today()} today, next signal check in {next_check:.0f}s")
                 last_heartbeat = time.time()
 
-            # Check for signal updates
-            if time.time() - last_signal_update_check > SIGNAL_UPDATE_INTERVAL_SEC:
-                check_signal_updates(discord, engine, st, log)
-                last_signal_update_check = time.time()
+            # ----- SIGNAL POLLING (only at full hour) -----
+            if now.minute == 0:
+                for delay in SIGNAL_CHECK_DELAYS:
+                    if delay not in signal_checks_done and current_second >= delay:
+                        log.info(f"🔍 Signal check #{SIGNAL_CHECK_DELAYS.index(delay)+1} at XX:00:{delay:02d}")
+                        signal_checks_done.add(delay)
 
-            # maintenance first
-            engine.cancel_expired_entries()
-            engine.check_entry_order_validity()  # Cancel entry if TP1 reached before entry filled
-            engine.cleanup_closed_trades()
-            engine.check_tp_fills_fallback()  # Catch TP1 fills if WS missed
-            engine.check_position_alerts()    # Send Telegram alerts if position P&L crosses thresholds
-            engine.log_daily_stats()          # Log stats once per day
-
-            # entry-fill fallback (polling) and post-orders placement
-            for tid, tr in list(st.get("open_trades", {}).items()):
-                if tr.get("status") == "pending":
-                    # if position opened but ws missed: detect via positions size > 0
-                    sz, avg = engine.position_size_avg(tr["symbol"])
-                    if sz > 0 and avg > 0:
-                        tr["status"] = "open"
-                        tr["entry_price"] = avg
-                        tr["filled_ts"] = time.time()
-                        log.info(f"✅ ENTRY (poll) {tr['symbol']} @ {avg}")
-                if tr.get("status") == "open" and not tr.get("post_orders_placed"):
-                    engine.place_post_entry_orders(tr)
-
-            # enforce concurrent trades
-            active = [tr for tr in st.get("open_trades", {}).values() if tr.get("status") in ("pending","open")]
-            if len(active) >= MAX_CONCURRENT_TRADES:
-                log.info(f"Active trades {len(active)}/{MAX_CONCURRENT_TRADES} → skip new signals")
-            elif trades_today() >= MAX_TRADES_PER_DAY:
-                log.info(f"Trades today {trades_today()}/{MAX_TRADES_PER_DAY} → skip new signals")
-            else:
-                # read discord
-                after = st.get("last_discord_id")
-                log.debug(f"Polling Discord (after={after})...")
-                try:
-                    msgs = discord.fetch_after(after, limit=50)
-                except Exception as e:
-                    log.warning(f"Discord fetch failed: {e}")
-                    msgs = []
-
-                log.debug(f"Fetched {len(msgs)} message(s) from Discord")
-                msgs_sorted = sorted(msgs, key=lambda m: int(m.get("id","0")))
-                max_seen = int(after or 0)
-
-                for m in msgs_sorted:
-                    mid = int(m.get("id","0"))
-                    max_seen = max(max_seen, mid)
-
-                    # ignore very old messages
-                    ts = discord.message_timestamp_unix(m)
-                    age = time.time() - ts if ts else 0
-                    if ts and age > TC_MAX_LAG_SEC:
-                        log.debug(f"Skipping old message (age={age:.0f}s > {TC_MAX_LAG_SEC}s)")
-                        continue
-
-                    txt = discord.extract_text(m)
-                    if not txt:
-                        log.debug(f"Message {mid}: empty text, skipping")
-                        continue
-
-                    # Log first 200 chars of message for debugging
-                    log.debug(f"Message {mid}: {txt[:200]}...")
-
-                    sig = parse_signal(txt, quote=QUOTE)
-                    if not sig:
-                        # Check if it looks like a signal but failed to parse
-                        if "SIGNAL" in txt.upper() or "ENTRY" in txt.upper():
-                            log.warning(f"⚠️ Possible signal NOT parsed: {txt[:300]}...")
+                        if can_take_new_trade():
+                            found = check_for_new_signals()
+                            if found:
+                                log.info("✅ Signal found! Skipping remaining checks this hour.")
+                                # Mark all remaining checks as done
+                                signal_checks_done.update(SIGNAL_CHECK_DELAYS)
+                                break
                         else:
-                            log.debug(f"Message {mid}: not a signal")
-                        continue
+                            active = [tr for tr in st.get("open_trades", {}).values() if tr.get("status") in ("pending", "open")]
+                            log.info(f"⏸️ Skipping signal check: {len(active)}/{MAX_CONCURRENT_TRADES} active, {trades_today()}/{MAX_TRADES_PER_DAY} today")
 
-                    log.info(f"📨 Signal parsed: {sig['symbol']} {sig['side'].upper()} @ {sig['trigger']}")
+            # ----- TRADE MANAGEMENT (every TRADE_MGMT_INTERVAL seconds) -----
+            if time.time() - last_trade_mgmt >= TRADE_MGMT_INTERVAL:
+                last_trade_mgmt = time.time()
 
-                    sh = signal_hash(sig)
-                    seen = set(st.get("seen_signal_hashes", []))
-                    if sh in seen:
-                        log.debug(f"Signal {sig['symbol']} already seen, skipping")
-                        continue
+                # Maintenance tasks
+                engine.cancel_expired_entries()
+                engine.check_entry_order_validity()
+                engine.cleanup_closed_trades()
+                engine.check_tp_fills_fallback()
+                engine.check_position_alerts()
+                engine.log_daily_stats()
 
-                    # mark seen early
-                    seen.add(sh)
-                    st["seen_signal_hashes"] = list(seen)[-500:]
+                # Check signal status for pending trades
+                check_signal_status(discord, engine, st, log)
 
-                    trade_id = f"{sig['symbol']}|{sig['side']}|{int(time.time())}"
-                    log.info(f"🔄 Placing entry order for {sig['symbol']}...")
-                    oid = engine.place_conditional_entry(sig, trade_id)
-                    if not oid:
-                        log.warning(f"❌ Entry order failed for {sig['symbol']}")
-                        continue
+                # Entry-fill fallback (polling) and post-orders placement
+                for tid, tr in list(st.get("open_trades", {}).items()):
+                    if tr.get("status") == "pending":
+                        sz, avg = engine.position_size_avg(tr["symbol"])
+                        if sz > 0 and avg > 0:
+                            tr["status"] = "open"
+                            tr["entry_price"] = avg
+                            tr["filled_ts"] = time.time()
+                            log.info(f"✅ ENTRY (poll) {tr['symbol']} @ {avg}")
 
-                    # Get current equity for risk tracking
-                    try:
-                        equity_now = bybit.wallet_equity(ACCOUNT_TYPE)
-                    except Exception:
-                        equity_now = 0
+                    if tr.get("status") == "open" and not tr.get("post_orders_placed"):
+                        engine.place_post_entry_orders(tr)
 
-                    # store trade
-                    st.setdefault("open_trades", {})[trade_id] = {
-                        "id": trade_id,
-                        "symbol": sig["symbol"],
-                        "order_side": "Sell" if sig["side"] == "sell" else "Buy",
-                        "pos_side": "Short" if sig["side"] == "sell" else "Long",
-                        "trigger": float(sig["trigger"]),
-                        "tp_prices": sig.get("tp_prices") or [],
-                        "tp_splits": None,  # engine uses config
-                        "dca_prices": sig.get("dca_prices") or [],
-                        "sl_price": sig.get("sl_price"),
-                        "entry_order_id": oid,
-                        "status": "pending",
-                        "placed_ts": time.time(),
-                        "base_qty": engine.calc_base_qty(sig["symbol"], float(sig["trigger"])),
-                        "raw": sig.get("raw", ""),
-                        "discord_msg_id": mid,  # Store Discord message ID for signal updates
-                        # Risk & Leverage tracking (captured at trade creation)
-                        "risk_pct": RISK_PCT,
-                        "risk_amount": round(equity_now * RISK_PCT / 100, 2) if equity_now > 0 else None,
-                        "equity_at_entry": round(equity_now, 2) if equity_now > 0 else None,
-                        "leverage": LEVERAGE,
-                    }
-                    inc_trades_today()
-                    log.info(f"🟡 ENTRY PLACED {sig['symbol']} {sig['side'].upper()} trigger={sig['trigger']} (id={trade_id})")
-
-                    # stop if we hit limits mid-batch
-                    active = [tr for tr in st.get("open_trades", {}).values() if tr.get("status") in ("pending","open")]
-                    if len(active) >= MAX_CONCURRENT_TRADES or trades_today() >= MAX_TRADES_PER_DAY:
-                        break
-
-                st["last_discord_id"] = str(max_seen) if max_seen else after
-
-            save_state(STATE_FILE, st)
+                save_state(STATE_FILE, st)
 
         except KeyboardInterrupt:
             log.info("Bye")
@@ -357,7 +355,9 @@ def main():
             log.exception(f"Loop error: {e}")
             time.sleep(3)
 
-        time.sleep(max(1, POLL_SECONDS + random.uniform(0, max(0, POLL_JITTER_MAX))))
+        # Short sleep - we check time frequently for precise hourly polling
+        time.sleep(1)
+
 
 if __name__ == "__main__":
     main()

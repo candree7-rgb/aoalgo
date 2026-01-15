@@ -1,7 +1,9 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not needed on Railway (ENVs set directly)
 
 def _get(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
