@@ -201,6 +201,16 @@ class TradeEngine:
         side   = "Sell" if sig["side"] == "sell" else "Buy"
         trigger = float(sig["trigger"])
 
+        # Validate symbol exists on Bybit
+        try:
+            rules = self._get_instrument_rules(symbol)
+            if not rules or rules.get("tick_size", 0) <= 0:
+                self.log.warning(f"⚠️ SKIP {symbol} – symbol not found on Bybit Futures")
+                return None
+        except Exception as e:
+            self.log.warning(f"⚠️ SKIP {symbol} – invalid symbol on Bybit: {e}")
+            return None
+
         # Symbol Locking: Check if another bot is already trading this symbol
         if db_export.is_enabled():
             active_trade = db_export.get_active_trade_for_symbol(symbol)
@@ -216,7 +226,12 @@ class TradeEngine:
         except Exception as e:
             self.log.warning(f"set_leverage failed for {symbol}: {e}")
 
-        last = self.bybit.last_price(CATEGORY, symbol)
+        # Get last price (symbol already validated above)
+        try:
+            last = self.bybit.last_price(CATEGORY, symbol)
+        except Exception as e:
+            self.log.warning(f"⚠️ SKIP {symbol} – could not get price: {e}")
+            return None
         if self._too_far(side, last, trigger):
             self.log.info(f"SKIP {symbol} – too far past trigger (last={last}, trigger={trigger})")
             return None
@@ -224,8 +239,7 @@ class TradeEngine:
             self.log.info(f"SKIP {symbol} – beyond expiry-price rule (last={last}, trigger={trigger})")
             return None
 
-        # Get instrument rules for price/qty rounding
-        rules = self._get_instrument_rules(symbol)
+        # Use rules from earlier validation
         tick_size = rules["tick_size"]
 
         # buffer: slightly earlier trigger if desired
