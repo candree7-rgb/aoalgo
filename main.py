@@ -219,7 +219,6 @@ def main():
                 continue
 
             log.info(f"📨 Signal parsed: {sig['symbol']} {sig['side'].upper()} @ {sig['trigger']}")
-            found_signal = True
 
             sh = signal_hash(sig)
             seen = set(st.get("seen_signal_hashes", []))
@@ -227,16 +226,25 @@ def main():
                 log.debug(f"Signal {sig['symbol']} already seen, skipping")
                 continue
 
-            # Mark seen early
+            # Mark seen early (to prevent retries on same signal)
             seen.add(sh)
             st["seen_signal_hashes"] = list(seen)[-500:]
 
             trade_id = f"{sig['symbol']}|{sig['side']}|{int(time.time())}"
             log.info(f"🔄 Placing entry order for {sig['symbol']}...")
-            oid = engine.place_conditional_entry(sig, trade_id)
+
+            try:
+                oid = engine.place_conditional_entry(sig, trade_id)
+            except Exception as e:
+                log.error(f"❌ Entry order EXCEPTION for {sig['symbol']}: {e}")
+                oid = None
+
             if not oid:
-                log.warning(f"❌ Entry order failed for {sig['symbol']}")
+                log.warning(f"❌ Entry order failed for {sig['symbol']} - continuing with other signals")
                 continue
+
+            # Only set found_signal=True when trade is SUCCESSFULLY placed
+            found_signal = True
 
             # Get current equity for risk tracking
             try:
